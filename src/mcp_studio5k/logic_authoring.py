@@ -134,7 +134,7 @@ async def preview_import(
     ``change_token``, and ``x_path`` on success.
     """
     # Step 1 — validate proposed content first; fail fast before any I/O.
-    validation = validate_l5x(l5x_content)
+    validation = validate_l5x(l5x_content, max_bytes=max_bytes)
     if not validation.ok:
         return err_envelope(_format_issues(validation.issues))
 

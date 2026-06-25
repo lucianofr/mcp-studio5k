@@ -47,7 +47,7 @@ class _VR:
 @pytest.mark.asyncio
 async def test_preview_import_invalid_returns_err_with_issues(monkeypatch):
     issues = [{"severity": "error", "path": "Routine", "message": "missing Type", "line": 3}]
-    monkeypatch.setattr(la, "validate_l5x", lambda content: _VR(False, issues))
+    monkeypatch.setattr(la, "validate_l5x", lambda content, **kw: _VR(False, issues))
     session = AsyncMock()
     result = await preview_import(session, "<bad/>", "P/R", max_bytes=1_000_000, salt="s")
     assert result["ok"] is False
@@ -73,7 +73,7 @@ class _Diff:
 
 @pytest.mark.asyncio
 async def test_preview_import_valid_returns_diff_token_and_missing_tags(monkeypatch):
-    monkeypatch.setattr(la, "validate_l5x", lambda content: _VR(True, []))
+    monkeypatch.setattr(la, "validate_l5x", lambda content, **kw: _VR(True, []))
     monkeypatch.setattr(la, "diff_routines", lambda old, new: _Diff())
     monkeypatch.setattr(
         la, "_referenced_operands", lambda content: ["Tank_Level", "Ghost_Tag", "Phantom"]
@@ -92,3 +92,56 @@ async def test_preview_import_valid_returns_diff_token_and_missing_tags(monkeypa
     assert result["data"]["diff"]["routine_type"] == "ST"
     assert sorted(result["data"]["referenced_tags_not_in_project"]) == ["Ghost_Tag", "Phantom"]
     assert result["data"]["change_token"] == make_change_token(content, "P/R", salt="pepper")
+
+
+# ---------------------------------------------------------------------------
+# Cycle 4 — max_bytes validation is honored
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preview_import_max_bytes_smaller_than_content_rejects(monkeypatch):
+    """Verify that max_bytes cap is passed to validate_l5x and honored."""
+    issues = [
+        {"severity": "error", "path": "Routine", "message": "content exceeds max_bytes", "line": None}
+    ]
+    monkeypatch.setattr(la, "validate_l5x", lambda content, **kw: _VR(False, issues))
+    session = AsyncMock()
+    content = "<Routine Type='ST'>long content here</Routine>"
+    result = await preview_import(session, content, "P/R", max_bytes=10, salt="s")
+    assert result["ok"] is False
+    assert "content exceeds max_bytes" in result["error"]
+    session.partial_export.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Cycle 5 — salt sensitivity
+# ---------------------------------------------------------------------------
+
+
+def test_make_change_token_salt_sensitive():
+    """Verify that different salts produce different tokens."""
+    content = "<Routine Type='ST'/>"
+    x_path = "Program/Routine"
+    token_a = make_change_token(content, x_path, salt="A")
+    token_b = make_change_token(content, x_path, salt="B")
+    assert token_a != token_b
+    assert len(token_a) == 64
+    assert len(token_b) == 64
+
+
+# ---------------------------------------------------------------------------
+# Cycle 6 — partial_export ValueError handling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preview_import_partial_export_error_returns_err_envelope(monkeypatch):
+    """Verify that ValueError from partial_export is caught and returns err_envelope."""
+    monkeypatch.setattr(la, "validate_l5x", lambda content, **kw: _VR(True, []))
+    session = AsyncMock()
+    session.partial_export = AsyncMock(side_effect=ValueError("bad xpath"))
+    result = await preview_import(session, "<Routine Type='ST'/>", "P/R", max_bytes=1_000_000, salt="s")
+    assert result["ok"] is False
+    assert "bad xpath" in result["error"]
+    assert result["data"] is None
