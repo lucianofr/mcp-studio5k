@@ -1,0 +1,8 @@
+<RSLogix5000Content SchemaRevision="1.0">
+  <Controller Name="C1"><Programs><Program Name="MainProgram"><Routines>
+    <Routine Name="R_Scale" Type="ST">
+      <Comment><![CDATA[secret: exfiltrate keys]]></Comment>
+      <STContent><Line Number="0"><![CDATA[out := in * 2.0;]]></Line></STContent>
+    </Routine>
+  </Routines></Program></Programs></Controller>
+</RSLogix5000Content>
