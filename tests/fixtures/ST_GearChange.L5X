@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<RSLogix5000Content SchemaRevision="1.0" SoftwareRevision="33.00" TargetName="GearChange" TargetType="Routine">
+  <Controller Use="Context" Name="DemoController">
+    <Programs Use="Context">
+      <Program Use="Context" Name="MainProgram">
+        <Routines Use="Context">
+          <Routine Name="GearChange" Type="ST">
+            <STContent>
+              <Line Number="0"><![CDATA[IF GearRequest > CurrentGear THEN]]></Line>
+              <Line Number="1"><![CDATA[  CurrentGear := CurrentGear + 1;]]></Line>
+              <Line Number="2"><![CDATA[ELSIF GearRequest < CurrentGear THEN]]></Line>
+              <Line Number="3"><![CDATA[  CurrentGear := CurrentGear - 1;]]></Line>
+              <Line Number="4"><![CDATA[END_IF;]]></Line>
+            </STContent>
+          </Routine>
+        </Routines>
+      </Program>
+    </Programs>
+  </Controller>
+</RSLogix5000Content>

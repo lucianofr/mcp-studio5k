@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<RSLogix5000Content SchemaRevision="1.0" SoftwareRevision="33.00" TargetName="ScaleValue" TargetType="Routine">
+  <Controller Use="Context" Name="DemoController">
+    <Programs Use="Context">
+      <Program Use="Context" Name="MainProgram">
+        <Routines Use="Context">
+          <Routine Name="ScaleValue" Type="RLL">
+            <RLLContent>
+              <Rung Number="0" Type="N">
+                <Comment><![CDATA[Scale raw input to engineering units]]></Comment>
+                <Text><![CDATA[CPT(ScaledValue, RawInput * Rate + Offset);]]></Text>
+              </Rung>
+              <Rung Number="1" Type="N">
+                <Text><![CDATA[XIC(Enable)OTE(ScaleActive);]]></Text>
+              </Rung>
+            </RLLContent>
+          </Routine>
+        </Routines>
+      </Program>
+    </Programs>
+  </Controller>
+</RSLogix5000Content>
