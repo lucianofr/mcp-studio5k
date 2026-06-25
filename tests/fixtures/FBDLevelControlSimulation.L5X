@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RSLogix5000Content SchemaRevision="1.0" SoftwareRevision="32.00" TargetType="Routine">
+  <Controller Use="Context" Name="LevelControl">
+    <Programs>
+      <Program Use="Context" Name="MainProgram">
+        <Routines>
+          <Routine Name="LevelSim" Type="FBD">
+            <FBDContent SheetSize="Tabloid - 11 x 17 in" SheetOrientation="Landscape">
+              <Sheet Number="1">
+                <IRef ID="0" X="160" Y="420" Operand="FlowIntoTank"/>
+                <OCon ID="1" X="520" Y="280" Name="TankLevel"/>
+                <Block Type="ADD" ID="2" X="300" Y="100" Operand="ADD_01" VisiblePins="SourceA SourceB Dest"/>
+                <Wire FromID="0" ToID="2" ToParam="SourceA"/>
+                <Wire FromID="2" FromParam="Dest" ToID="1"/>
+                <FeedbackWire FromID="2" FromParam="Dest" ToID="2" ToParam="SourceB"/>
+              </Sheet>
+            </FBDContent>
+          </Routine>
+        </Routines>
+      </Program>
+    </Programs>
+  </Controller>
+</RSLogix5000Content>
