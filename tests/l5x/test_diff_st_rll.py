@@ -57,3 +57,41 @@ def test_st_referenced_tags_from_new_content():
     d = diff_routines(None, _st(["Level := FlowIntoTank + Offset;"]), max_bytes=100_000)
     assert "FlowIntoTank" in d.referenced_tags
     assert "Offset" in d.referenced_tags
+
+
+def _rll(rungs: list[str]) -> str:
+    body = "".join(
+        f'<Rung Number="{i}" Type="N"><Text><![CDATA[{t}]]></Text></Rung>'
+        for i, t in enumerate(rungs)
+    )
+    return (
+        '<RSLogix5000Content SchemaRevision="1.0"><Controller Name="C"><Programs>'
+        '<Program Name="P"><Routines><Routine Name="R" Type="RLL"><RLLContent>'
+        f"{body}</RLLContent></Routine></Routines></Program></Programs></Controller></RSLogix5000Content>"
+    )
+
+
+def test_rll_old_none_all_rungs_added():
+    d = diff_routines(None, _rll(["XIC(Start)OTE(Motor);"]), max_bytes=100_000)
+    assert d.routine_type == "RLL"
+    assert [e.kind for e in d.entries] == ["add"]
+    assert d.entries[0].unit == "rung"
+
+
+def test_rll_written_coils_from_ote():
+    d = diff_routines(None, _rll(["XIC(Start)OTE(Motor);", "XIC(Aux)OTL(Latch);"]), max_bytes=100_000)
+    assert "Motor" in d.written_coils
+    assert "Latch" in d.written_coils
+
+
+def test_rll_referenced_tags_include_inputs_and_coils():
+    d = diff_routines(None, _rll(["XIC(Start)XIO(Stop)OTE(Motor);"]), max_bytes=100_000)
+    assert {"Start", "Stop", "Motor"} <= set(d.referenced_tags)
+
+
+def test_rll_rung_add_when_appended():
+    old = _rll(["XIC(Start)OTE(Motor);"])
+    new = _rll(["XIC(Start)OTE(Motor);", "XIC(Aux)OTE(Pump);"])
+    d = diff_routines(old, new, max_bytes=100_000)
+    assert ("add", "1") in {(e.kind, e.locator) for e in d.entries}
+    assert "Pump" in d.written_coils

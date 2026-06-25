@@ -40,6 +40,11 @@ _ST_KEYWORDS = frozenset(
     }
 )
 
+# Coil-style (output) ladder instructions: their operand is a written coil.
+_COIL_INSTR = frozenset({"OTE", "OTL", "OTU"})
+# instruction(args) — e.g. XIC(Start), OTE(Motor), CPT(Out, In * 2)
+_INSTR = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)")
+
 
 @dataclass(frozen=True)
 class DiffEntry:
@@ -145,6 +150,58 @@ def _diff_st(old_routine, new_routine) -> RoutineDiff:
     )
 
 
+def _rll_rungs(routine) -> dict[str, str]:
+    """Extract RLL rungs from routine element."""
+    if routine is None:
+        return {}
+    out: dict[str, str] = {}
+    for rung in routine.findall(".//Rung"):
+        text_el = rung.find("Text")
+        out[rung.get("Number", "")] = (text_el.text or "").strip() if text_el is not None else ""
+    return out
+
+
+def _rll_refs(text: str) -> tuple[list[str], list[str]]:
+    """Extract tag references and written coils from RLL text."""
+    refs: list[str] = []
+    coils: list[str] = []
+    for m in _INSTR.finditer(text):
+        instr = m.group(1).upper()
+        args = [a.strip() for a in m.group(2).split(",") if a.strip()]
+        for arg in args:
+            for tag_m in _IDENT.finditer(arg):
+                refs.append(tag_m.group(0))
+        if instr in _COIL_INSTR and args:
+            coils.append(args[0])
+    return refs, coils
+
+
 def _diff_rll(old_routine, new_routine) -> RoutineDiff:
-    """Placeholder for RLL diff."""
-    raise NotImplementedError("_diff_rll not yet implemented")
+    """Diff RLL routines per-rung."""
+    old = _rll_rungs(old_routine)
+    new = _rll_rungs(new_routine)
+    entries: list[DiffEntry] = []
+    referenced: list[str] = []
+    coils: list[str] = []
+
+    for num, text in new.items():
+        if num not in old:
+            entries.append(DiffEntry("add", "rung", num, text))
+            refs, written = _rll_refs(text)
+            referenced.extend(refs)
+            coils.extend(written)
+        elif old[num] != text:
+            entries.append(DiffEntry("alter", "rung", num, text))
+            refs, written = _rll_refs(text)
+            referenced.extend(refs)
+            coils.extend(written)
+    for num, text in old.items():
+        if num not in new:
+            entries.append(DiffEntry("remove", "rung", num, text))
+
+    return RoutineDiff(
+        routine_type="RLL",
+        entries=tuple(entries),
+        referenced_tags=_dedupe(referenced),
+        written_coils=_dedupe(coils),
+    )
