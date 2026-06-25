@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from mcp_studio5k.l5x.errors import ValidationIssue
 
+START_LINE_NUMBER = 0
+
 
 def validate_st(routine_el) -> tuple[ValidationIssue, ...]:
     """Validate an ST <Routine>: requires <STContent> with CDATA lines."""
@@ -32,7 +34,7 @@ def validate_st(routine_el) -> tuple[ValidationIssue, ...]:
         )
         return tuple(issues)
 
-    expected = 0
+    expected = START_LINE_NUMBER
     for line_el in lines:
         raw_number = line_el.get("Number")
         try:
