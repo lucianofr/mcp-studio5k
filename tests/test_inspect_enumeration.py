@@ -1,6 +1,8 @@
 """Tests for inspect.py — list_* enumeration via partial-export+parse (Task 18)."""
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from mcp_studio5k.inspect import list_programs, list_routines, list_tags, strip_comments
@@ -95,3 +97,80 @@ async def test_list_tags_no_filter_returns_all(mock_session):
     mock_session._routes["Tags"] = "tags_export.L5X"
     result = await list_tags(mock_session, "controller")
     assert result["meta"]["total"] == 4
+
+
+# ---------------------------------------------------------------------------
+# SECURITY — XPath injection rejection (IMPORTANT-1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_routines_rejects_xpath_injection(mock_session):
+    """Program name with injection chars returns err_envelope; partial_export NOT called."""
+    result = await list_routines(mock_session, "MainProgram' or '1'='1")
+    assert result["ok"] is False
+    assert "invalid program" in result["error"]
+    mock_session.partial_export.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_routines_rejects_other_injection_chars(mock_session):
+    """Additional non-identifier characters also rejected."""
+    for bad_name in ["../escape", "Prog<script>", "A" * 41, ""]:
+        mock_session.partial_export.reset_mock()
+        result = await list_routines(mock_session, bad_name)
+        assert result["ok"] is False, f"should reject {bad_name!r}"
+        mock_session.partial_export.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_rejects_xpath_injection_in_scope(mock_session):
+    """Scope containing injection chars returns err_envelope; partial_export NOT called."""
+    result = await list_tags(mock_session, "SomeProgram' or '1'='1")
+    assert result["ok"] is False
+    assert "invalid scope" in result["error"]
+    mock_session.partial_export.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_tags_controller_scope_bypasses_validation(mock_session):
+    """The 'controller' sentinel is allowed without identifier validation."""
+    mock_session._routes["Tags"] = "tags_export.L5X"
+    result = await list_tags(mock_session, "controller")
+    assert result["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# MINOR — truncated flag reflects whether more pages exist
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_programs_truncated_true_on_partial_page(mock_session):
+    mock_session._routes["Programs"] = "programs_export.L5X"
+    page1 = await list_programs(mock_session, page_size=2)
+    assert page1["meta"]["truncated"] is True
+    page2 = await list_programs(mock_session, page_size=2, cursor=page1["meta"]["page"])
+    assert page2["meta"]["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_programs_truncated_false_when_all_fit(mock_session):
+    mock_session._routes["Programs"] = "programs_export.L5X"
+    result = await list_programs(mock_session, page_size=100)
+    assert result["meta"]["truncated"] is False
+
+
+# ---------------------------------------------------------------------------
+# MINOR — negative cursor guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_programs_rejects_negative_cursor(mock_session):
+    """A cursor encoding a negative offset returns err_envelope."""
+    mock_session._routes["Programs"] = "programs_export.L5X"
+    negative_cursor = base64.urlsafe_b64encode(b"-1").decode()
+    result = await list_programs(mock_session, cursor=negative_cursor)
+    assert result["ok"] is False
+    assert "cursor" in result["error"]

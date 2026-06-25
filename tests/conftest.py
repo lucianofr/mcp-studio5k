@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
 
 
 class FakeLogixProject:
@@ -105,10 +108,6 @@ class StubConfig:
 # ---------------------------------------------------------------------------
 # mock_session — reusable AsyncMock ProjectSession double (Task 18+)
 # ---------------------------------------------------------------------------
-
-from unittest.mock import AsyncMock  # noqa: E402
-
-import pytest  # noqa: E402
 
 _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 

@@ -1,37 +1,25 @@
 from __future__ import annotations
 
 import base64
+import re
 
 from lxml import etree
 
 from .envelope import Meta, err_envelope, ok_envelope
-
-MAX_L5X_BYTES = 5 * 1024 * 1024  # §7 size ceiling before parse
+from .l5x.parse import L5xParseError, parse_l5x
 
 PROGRAMS_XPATH = "Controller/Programs"
 
-
-def _hardened_parser() -> "etree.XMLParser":
-    return etree.XMLParser(
-        resolve_entities=False,
-        no_network=True,
-        load_dtd=False,
-        dtd_validation=False,
-        huge_tree=False,
-    )
+_VALID_PLC_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,39}$")
 
 
-def _parse(l5x_content: str) -> "etree._Element":
-    raw = l5x_content.encode("utf-8")
-    if len(raw) > MAX_L5X_BYTES:
-        raise ValueError("L5X exceeds maximum allowed size")
-    if "<!DOCTYPE" in l5x_content:
-        raise ValueError("DOCTYPE is not allowed in L5X")
-    return etree.fromstring(raw, parser=_hardened_parser())
+def _validate_name(name: str, param: str) -> None:
+    if not _VALID_PLC_NAME.match(name):
+        raise ValueError(f"invalid {param}: {name!r}")
 
 
 def strip_comments(l5x_content: str) -> str:
-    root = _parse(l5x_content)
+    root = parse_l5x(l5x_content)
     for comment in root.findall(".//Comment"):
         comment.getparent().remove(comment)
     return etree.tostring(root, encoding="unicode")
@@ -45,9 +33,12 @@ def _decode_cursor(cursor: "str | None") -> int:
     if cursor is None:
         return 0
     try:
-        return int(base64.urlsafe_b64decode(cursor.encode()).decode())
+        value = int(base64.urlsafe_b64decode(cursor.encode()).decode())
     except (ValueError, TypeError):
         raise ValueError("invalid cursor")
+    if value < 0:
+        raise ValueError("invalid cursor: negative offset")
+    return value
 
 
 def _paginate(items: list, page_size: int, cursor: "str | None"):
@@ -61,16 +52,19 @@ def _paginate(items: list, page_size: int, cursor: "str | None"):
 async def list_programs(session, *, page_size: int = 100, cursor: "str | None" = None) -> dict:
     try:
         xml = strip_comments(await session.partial_export(PROGRAMS_XPATH))
-        root = etree.fromstring(xml.encode("utf-8"), parser=_hardened_parser())
-    except ValueError as exc:
+        root = parse_l5x(xml)
+        programs = [
+            {"name": el.get("Name"), "data_type": None, "scope": "controller"}
+            for el in root.findall(".//Programs/Program")
+            if el.get("Name")
+        ]
+        window, next_cursor, total = _paginate(programs, page_size, cursor)
+    except (ValueError, L5xParseError) as exc:
         return err_envelope(str(exc))
-    programs = [
-        {"name": el.get("Name"), "data_type": None, "scope": "controller"}
-        for el in root.findall(".//Programs/Program")
-        if el.get("Name")
-    ]
-    window, next_cursor, total = _paginate(programs, page_size, cursor)
-    return ok_envelope(window, meta=Meta(total=total, page=next_cursor))
+    return ok_envelope(
+        window,
+        meta=Meta(total=total, page=next_cursor, truncated=(next_cursor is not None)),
+    )
 
 
 def _routines_xpath(program: str) -> str:
@@ -81,17 +75,21 @@ async def list_routines(
     session, program: str, *, page_size: int = 100, cursor: "str | None" = None
 ) -> dict:
     try:
+        _validate_name(program, "program")
         xml = strip_comments(await session.partial_export(_routines_xpath(program)))
-        root = etree.fromstring(xml.encode("utf-8"), parser=_hardened_parser())
-    except ValueError as exc:
+        root = parse_l5x(xml)
+        routines = [
+            {"name": el.get("Name"), "data_type": el.get("Type"), "scope": program}
+            for el in root.findall(".//Routines/Routine")
+            if el.get("Name")
+        ]
+        window, next_cursor, total = _paginate(routines, page_size, cursor)
+    except (ValueError, L5xParseError) as exc:
         return err_envelope(str(exc))
-    routines = [
-        {"name": el.get("Name"), "data_type": el.get("Type"), "scope": program}
-        for el in root.findall(".//Routines/Routine")
-        if el.get("Name")
-    ]
-    window, next_cursor, total = _paginate(routines, page_size, cursor)
-    return ok_envelope(window, meta=Meta(total=total, page=next_cursor))
+    return ok_envelope(
+        window,
+        meta=Meta(total=total, page=next_cursor, truncated=(next_cursor is not None)),
+    )
 
 
 def _tags_xpath(scope: str) -> str:
@@ -109,15 +107,20 @@ async def list_tags(
     cursor: "str | None" = None,
 ) -> dict:
     try:
+        if scope != "controller":
+            _validate_name(scope, "scope")
         xml = strip_comments(await session.partial_export(_tags_xpath(scope)))
-        root = etree.fromstring(xml.encode("utf-8"), parser=_hardened_parser())
-    except ValueError as exc:
+        root = parse_l5x(xml)
+        needle = name_filter.lower() if name_filter else None
+        tags = [
+            {"name": el.get("Name"), "data_type": el.get("DataType"), "scope": scope}
+            for el in root.findall(".//Tags/Tag")
+            if el.get("Name") and (needle is None or needle in el.get("Name").lower())
+        ]
+        window, next_cursor, total = _paginate(tags, page_size, cursor)
+    except (ValueError, L5xParseError) as exc:
         return err_envelope(str(exc))
-    needle = name_filter.lower() if name_filter else None
-    tags = [
-        {"name": el.get("Name"), "data_type": el.get("DataType"), "scope": scope}
-        for el in root.findall(".//Tags/Tag")
-        if el.get("Name") and (needle is None or needle in el.get("Name").lower())
-    ]
-    window, next_cursor, total = _paginate(tags, page_size, cursor)
-    return ok_envelope(window, meta=Meta(total=total, page=next_cursor))
+    return ok_envelope(
+        window,
+        meta=Meta(total=total, page=next_cursor, truncated=(next_cursor is not None)),
+    )
