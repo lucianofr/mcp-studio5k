@@ -55,6 +55,14 @@ def test_rejects_non_acd_extension(tmp_path):
         resolve_under_root(root / "P.l5x", root)
 
 
+def test_rejects_absolute_path_outside_root(tmp_path):
+    root = tmp_path / "projects"
+    root.mkdir()
+    outside = tmp_path / "sibling" / "P.acd"
+    with pytest.raises(SessionError):
+        resolve_under_root(outside, root)
+
+
 # --- Cycle 15.3: open / status / close lifecycle ---
 
 @pytest.fixture(autouse=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 UNC_PREFIXES = ("\\\\", "//")
 
@@ -43,7 +44,7 @@ class ProjectSession:
         self._path: Path | None = None
         self._write_count = 0
 
-    def status(self) -> dict:
+    def status(self) -> dict[str, Any]:
         return {
             "active": self._project is not None,
             "path": str(self._path) if self._path else None,
@@ -53,10 +54,16 @@ class ProjectSession:
     async def open(self, path: Path) -> None:
         resolved = resolve_under_root(path, self._config.project_root)
         async with self._lock:
+            # SDK open occurs INSIDE the lock BEFORE the single-project guard.
+            # cycle-15.5 asserts call order ["enter","exit","enter","exit"], which
+            # requires the SDK call to happen unconditionally under the lock.
+            # Note: create() uses the safer guard-first order; do NOT change that.
             project = await self._sdk_cls.open_logix_project(str(resolved))
             if self._project is not None:
-                await project.close()
-                raise SessionError("a project is already open; close it first")
+                try:
+                    await project.close()
+                finally:
+                    raise SessionError("a project is already open; close it first")
             self._project = project
             self._path = resolved
             self._write_count = 0

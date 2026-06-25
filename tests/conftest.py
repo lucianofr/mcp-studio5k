@@ -75,6 +75,7 @@ class FakeLogixProject:
 
 
 def reset_fake() -> None:
+    """Reset class-level state on FakeLogixProject; call between test files — FakeLogixProject.calls is CLASS-LEVEL and persists across tests without this."""
     FakeLogixProject.fail_open = False
     FakeLogixProject.fail_import = False
     FakeLogixProject.fail_save = False
