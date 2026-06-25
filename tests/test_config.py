@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from mcp_studio5k.config import Config
+from mcp_studio5k.config import Config, load_config
+
+ENV_PROJECT_ROOT = "MCP_S5K_PROJECT_ROOT"
+ENV_BACKUP_DIR = "MCP_S5K_BACKUP_DIR"
+ENV_READ_ONLY = "MCP_S5K_READ_ONLY"
+ENV_ALLOWED_PROPS = "MCP_S5K_ALLOWED_PROPS"
+ENV_SAFETY_EXCLUSIONS = "MCP_S5K_SAFETY_EXCLUSIONS"
 
 
 def test_config_is_frozen_immutable():
@@ -30,3 +36,71 @@ def test_config_safe_defaults():
     assert cfg.cooldown_seconds == 10.0
     assert cfg.backup_rotation == 10
     assert cfg.sdk_port == 53204
+
+
+def _set_required_env(monkeypatch, root: Path, backup: Path):
+    monkeypatch.setenv(ENV_PROJECT_ROOT, str(root))
+    monkeypatch.setenv(ENV_BACKUP_DIR, str(backup))
+
+
+def test_load_config_resolves_existing_dirs(tmp_path, monkeypatch):
+    root = tmp_path / "proj"
+    backup = tmp_path / "backup"
+    root.mkdir()
+    backup.mkdir()
+    _set_required_env(monkeypatch, root, backup)
+    monkeypatch.delenv(ENV_READ_ONLY, raising=False)
+
+    cfg = load_config()
+
+    assert cfg.project_root == root.resolve()
+    assert cfg.backup_dir == backup.resolve()
+    assert cfg.read_only is True  # absent env -> safe default
+
+
+def test_read_only_only_disabled_by_literal_false(tmp_path, monkeypatch):
+    root = tmp_path / "proj"
+    backup = tmp_path / "backup"
+    root.mkdir()
+    backup.mkdir()
+    _set_required_env(monkeypatch, root, backup)
+
+    monkeypatch.setenv(ENV_READ_ONLY, "false")
+    assert load_config().read_only is False
+
+    monkeypatch.setenv(ENV_READ_ONLY, "FALSE")  # case-insensitive
+    assert load_config().read_only is False
+
+    for risky in ("0", "no", "off", "", "true", "yes", "anything"):
+        monkeypatch.setenv(ENV_READ_ONLY, risky)
+        assert load_config().read_only is True  # only "false" disables
+
+
+def test_allowlist_parsing_splits_strips_dedupes(tmp_path, monkeypatch):
+    root = tmp_path / "proj"
+    backup = tmp_path / "backup"
+    root.mkdir()
+    backup.mkdir()
+    _set_required_env(monkeypatch, root, backup)
+    monkeypatch.setenv(ENV_ALLOWED_PROPS, " Name , Description ,Name, ")
+    monkeypatch.setenv(ENV_SAFETY_EXCLUSIONS, "E_Stop,SafetyGate")
+
+    cfg = load_config()
+
+    assert cfg.allowed_property_names == frozenset({"Name", "Description"})
+    assert cfg.safety_tag_exclusions == frozenset({"E_Stop", "SafetyGate"})
+
+
+def test_missing_required_env_raises_value_error(tmp_path, monkeypatch):
+    monkeypatch.delenv(ENV_PROJECT_ROOT, raising=False)
+    monkeypatch.delenv(ENV_BACKUP_DIR, raising=False)
+    with pytest.raises(ValueError, match=ENV_PROJECT_ROOT):
+        load_config()
+
+
+def test_nonexistent_project_root_raises(tmp_path, monkeypatch):
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    _set_required_env(monkeypatch, tmp_path / "missing", backup)
+    with pytest.raises(ValueError, match="project_root"):
+        load_config()
