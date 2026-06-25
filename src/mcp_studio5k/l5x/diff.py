@@ -1,9 +1,44 @@
 """Human-readable diff per routine dialect — spec §5 preview_import."""
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 
 from mcp_studio5k.l5x.parse import DEFAULT_MAX_L5X_BYTES, parse_l5x, routine_type
+
+# Bare identifiers that are operand/tag references, excluding ST keywords.
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+_ST_KEYWORDS = frozenset(
+    {
+        "IF",
+        "THEN",
+        "ELSE",
+        "ELSIF",
+        "END_IF",
+        "FOR",
+        "TO",
+        "BY",
+        "DO",
+        "END_FOR",
+        "WHILE",
+        "END_WHILE",
+        "REPEAT",
+        "UNTIL",
+        "END_REPEAT",
+        "CASE",
+        "OF",
+        "END_CASE",
+        "RETURN",
+        "AND",
+        "OR",
+        "XOR",
+        "NOT",
+        "MOD",
+        "TRUE",
+        "FALSE",
+        "EXIT",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -54,9 +89,60 @@ def diff_routines(
     raise ValueError(f"unsupported routine type for diff: {rtype!r}")
 
 
+def _st_lines(routine) -> dict[str, str]:
+    """Extract ST lines from routine element."""
+    if routine is None:
+        return {}
+    out: dict[str, str] = {}
+    for line in routine.findall(".//Line"):
+        out[line.get("Number", "")] = (line.text or "").strip()
+    return out
+
+
+def _st_refs(text: str) -> list[str]:
+    """Extract tag references from ST text."""
+    refs: list[str] = []
+    for m in _IDENT.finditer(text):
+        token = m.group(0)
+        head = token.split(".")[0].upper()
+        if head in _ST_KEYWORDS:
+            continue
+        refs.append(token)
+    return refs
+
+
+def _dedupe(items: list[str]) -> tuple[str, ...]:
+    """Deduplicate items while preserving order."""
+    seen: dict[str, None] = {}
+    for it in items:
+        seen.setdefault(it, None)
+    return tuple(seen)
+
+
 def _diff_st(old_routine, new_routine) -> RoutineDiff:
-    """Placeholder for ST diff."""
-    raise NotImplementedError("_diff_st not yet implemented")
+    """Diff ST routines per-line."""
+    old = _st_lines(old_routine)
+    new = _st_lines(new_routine)
+    entries: list[DiffEntry] = []
+    referenced: list[str] = []
+
+    for num, text in new.items():
+        if num not in old:
+            entries.append(DiffEntry("add", "line", num, text))
+            referenced.extend(_st_refs(text))
+        elif old[num] != text:
+            entries.append(DiffEntry("alter", "line", num, text))
+            referenced.extend(_st_refs(text))
+    for num, text in old.items():
+        if num not in new:
+            entries.append(DiffEntry("remove", "line", num, text))
+
+    return RoutineDiff(
+        routine_type="ST",
+        entries=tuple(entries),
+        referenced_tags=_dedupe(referenced),
+        written_coils=(),
+    )
 
 
 def _diff_rll(old_routine, new_routine) -> RoutineDiff:
