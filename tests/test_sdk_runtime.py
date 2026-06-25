@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from mcp_studio5k.sdk_runtime import SdkRuntimeError, check_loopback_bound, ensure_server_running
+from mcp_studio5k.sdk_runtime import SdkRuntimeError, check_loopback_bound, ensure_server_running, restart_server
 
 SDK_PORT = 53204
 
@@ -104,3 +104,41 @@ async def test_ensure_raises_when_not_loopback_bound(tmp_path, monkeypatch):
 
     with pytest.raises(SdkRuntimeError, match="loopback"):
         await ensure_server_running(info, port=SDK_PORT)
+
+
+@pytest.mark.asyncio
+async def test_restart_terminates_existing_then_starts(tmp_path, monkeypatch):
+    info = _fake_info(tmp_path)
+    terminate = AsyncMock()
+    monkeypatch.setattr("mcp_studio5k.sdk_runtime._terminate_pid", terminate)
+    monkeypatch.setattr(
+        "mcp_studio5k.sdk_runtime._find_running_pid", lambda port: 7777
+    )
+    monkeypatch.setattr(
+        "mcp_studio5k.sdk_runtime.ensure_server_running",
+        AsyncMock(return_value=8888),
+    )
+
+    pid = await restart_server(info, port=SDK_PORT)
+
+    terminate.assert_awaited_once_with(7777)
+    assert pid == 8888
+
+
+@pytest.mark.asyncio
+async def test_restart_skips_terminate_when_nothing_running(tmp_path, monkeypatch):
+    info = _fake_info(tmp_path)
+    terminate = AsyncMock()
+    monkeypatch.setattr("mcp_studio5k.sdk_runtime._terminate_pid", terminate)
+    monkeypatch.setattr(
+        "mcp_studio5k.sdk_runtime._find_running_pid", lambda port: None
+    )
+    monkeypatch.setattr(
+        "mcp_studio5k.sdk_runtime.ensure_server_running",
+        AsyncMock(return_value=8889),
+    )
+
+    pid = await restart_server(info, port=SDK_PORT)
+
+    terminate.assert_not_awaited()
+    assert pid == 8889

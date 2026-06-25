@@ -11,6 +11,7 @@ DEFAULT_SDK_PORT = 53204
 LISTEN_STATUS = "LISTEN"
 SERVER_START_TIMEOUT_SECONDS = 15.0
 SERVER_POLL_INTERVAL_SECONDS = 0.25
+TERMINATE_TIMEOUT_SECONDS = 10.0
 
 
 class SdkRuntimeError(Exception):
@@ -83,3 +84,26 @@ async def ensure_server_running(info: SdkInfo, *, port: int = DEFAULT_SDK_PORT) 
             f"({LOOPBACK_IP}); refusing to use a non-local listener"
         )
     return pid
+
+
+async def _terminate_pid(pid: int) -> None:
+    """Terminate the process by PID, escalating to kill on timeout. Seam for tests."""
+    import psutil
+
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    proc.terminate()
+    try:
+        await asyncio.to_thread(proc.wait, TERMINATE_TIMEOUT_SECONDS)
+    except psutil.TimeoutExpired:
+        proc.kill()
+
+
+async def restart_server(info: SdkInfo, *, port: int = DEFAULT_SDK_PORT) -> int:
+    """Terminate any existing server on port, then ensure a fresh one; return PID."""
+    existing_pid = _find_running_pid(port)
+    if existing_pid is not None:
+        await _terminate_pid(existing_pid)
+    return await ensure_server_running(info, port=port)
