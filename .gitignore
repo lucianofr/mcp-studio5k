@@ -9,3 +9,4 @@ build/
 dist/
 .superpowers/
 *.tmp
+.claude/settings.local.json
