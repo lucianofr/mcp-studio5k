@@ -1,0 +1,13 @@
+<RSLogix5000Content SchemaRevision="1.0">
+  <Controller Name="C1">
+    <Programs>
+      <Program Name="MainProgram">
+        <Routines>
+          <Routine Name="R_Init" Type="RLL"/>
+          <Routine Name="R_Scale" Type="ST"/>
+          <Routine Name="R_Level" Type="FBD"/>
+        </Routines>
+      </Program>
+    </Programs>
+  </Controller>
+</RSLogix5000Content>

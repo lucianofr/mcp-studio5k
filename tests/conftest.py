@@ -100,3 +100,44 @@ class StubConfig:
         self.backup_rotation = 10
         self.safety_tag_exclusions: frozenset[str] = frozenset()
         self.max_l5x_bytes = 5_000_000
+
+
+# ---------------------------------------------------------------------------
+# mock_session — reusable AsyncMock ProjectSession double (Task 18+)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock  # noqa: E402
+
+import pytest  # noqa: E402
+
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _load_fixture(name: str) -> str:
+    return (_FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def mock_session():
+    """ProjectSession double: partial_export(x_path) -> L5X string per routed fixture.
+
+    Usage in tests::
+
+        mock_session._routes["Programs"] = "programs_export.L5X"
+        result = await list_programs(mock_session)
+
+    The ``_routes`` dict maps an xpath substring (needle) to a fixture filename
+    under ``tests/fixtures/``.  Any x_path that contains the needle returns the
+    fixture content; an unrouted path raises AssertionError to fail fast.
+    """
+    session = AsyncMock()
+    session._routes: dict[str, str] = {}
+
+    async def _partial_export(x_path: str) -> str:
+        for needle, fixture in session._routes.items():
+            if needle in x_path:
+                return _load_fixture(fixture)
+        raise AssertionError(f"no fixture routed for x_path={x_path!r}")
+
+    session.partial_export = AsyncMock(side_effect=_partial_export)
+    return session

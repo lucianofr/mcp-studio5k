@@ -1,0 +1,9 @@
+<RSLogix5000Content SchemaRevision="1.0">
+  <Controller Name="C1">
+    <Programs>
+      <Program Name="MainProgram"><Comment><![CDATA[drop me]]></Comment></Program>
+      <Program Name="Conveyor"/>
+      <Program Name="Packaging"/>
+    </Programs>
+  </Controller>
+</RSLogix5000Content>

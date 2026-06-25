@@ -1,0 +1,10 @@
+<RSLogix5000Content SchemaRevision="1.0">
+  <Controller Name="C1">
+    <Tags>
+      <Tag Name="Motor_Speed" DataType="REAL"/>
+      <Tag Name="Motor_Run" DataType="BOOL"/>
+      <Tag Name="Tank_Level" DataType="REAL"/>
+      <Tag Name="ESTOP_OK" DataType="BOOL"/>
+    </Tags>
+  </Controller>
+</RSLogix5000Content>
