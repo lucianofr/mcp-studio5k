@@ -91,6 +91,8 @@ def diff_routines(
         return _diff_st(old_routine, new_routine)
     if rtype == "RLL":
         return _diff_rll(old_routine, new_routine)
+    if rtype == "FBD":
+        return _diff_fbd(old_routine, new_routine)
     raise ValueError(f"unsupported routine type for diff: {rtype!r}")
 
 
@@ -204,4 +206,88 @@ def _diff_rll(old_routine, new_routine) -> RoutineDiff:
         entries=tuple(entries),
         referenced_tags=_dedupe(referenced),
         written_coils=_dedupe(coils),
+    )
+
+
+_FBD_NODE_TAGS = ("Block", "IRef", "OCon", "ICon")
+
+
+def _fbd_nodes(routine) -> dict[str, dict[str, str]]:
+    """Map node ID -> its attribute dict, for Block/IRef/OCon/ICon."""
+    if routine is None:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for sheet in routine.findall(".//Sheet"):
+        for el in sheet:
+            if el.tag in _FBD_NODE_TAGS and el.get("ID") is not None:
+                out[el.get("ID")] = dict(el.attrib)
+    return out
+
+
+def _fbd_wires(routine) -> dict[str, dict[str, str]]:
+    """Map a stable wire key -> its attribute dict."""
+    if routine is None:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for sheet in routine.findall(".//Sheet"):
+        for el in sheet:
+            if el.tag in ("Wire", "FeedbackWire"):
+                key = _wire_key(el.tag, dict(el.attrib))
+                out[key] = dict(el.attrib)
+    return out
+
+
+def _wire_key(tag: str, attrs: dict[str, str]) -> str:
+    return (
+        f"{tag}:{attrs.get('FromID', '')}.{attrs.get('FromParam', '')}"
+        f"->{attrs.get('ToID', '')}.{attrs.get('ToParam', '')}"
+    )
+
+
+def _node_detail(attrs: dict[str, str]) -> str:
+    if "Type" in attrs:
+        return f"Block {attrs.get('Type')} Operand={attrs.get('Operand', '')}"
+    if "Operand" in attrs:
+        return f"IRef Operand={attrs.get('Operand')}"
+    return f"{attrs.get('Name', '')}"
+
+
+def _collect_operand(attrs: dict[str, str], sink: list[str]) -> None:
+    operand = attrs.get("Operand")
+    if operand:
+        sink.append(operand)
+
+
+def _diff_fbd(old_routine, new_routine) -> RoutineDiff:
+    old_nodes = _fbd_nodes(old_routine)
+    new_nodes = _fbd_nodes(new_routine)
+    old_wires = _fbd_wires(old_routine)
+    new_wires = _fbd_wires(new_routine)
+
+    entries: list[DiffEntry] = []
+    referenced: list[str] = []
+
+    for node_id, attrs in new_nodes.items():
+        if node_id not in old_nodes:
+            entries.append(DiffEntry("add", "block", node_id, _node_detail(attrs)))
+            _collect_operand(attrs, referenced)
+        elif old_nodes[node_id] != attrs:
+            entries.append(DiffEntry("alter", "block", node_id, _node_detail(attrs)))
+            _collect_operand(attrs, referenced)
+    for node_id, attrs in old_nodes.items():
+        if node_id not in new_nodes:
+            entries.append(DiffEntry("remove", "block", node_id, _node_detail(attrs)))
+
+    for key, attrs in new_wires.items():
+        if key not in old_wires:
+            entries.append(DiffEntry("add", "wire", key, _node_detail(attrs)))
+    for key in old_wires:
+        if key not in new_wires:
+            entries.append(DiffEntry("remove", "wire", key, key))
+
+    return RoutineDiff(
+        routine_type="FBD",
+        entries=tuple(entries),
+        referenced_tags=_dedupe(referenced),
+        written_coils=(),
     )
