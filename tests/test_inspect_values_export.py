@@ -1,9 +1,4 @@
-"""Tests for inspect.get_tag_value and inspect.export_l5x (Task 19).
-
-Security note: tag_xpath is a full XPath expression whose validation is delegated
-to ProjectSession (reconciliation rule 9).  inspect.get_tag_value validates only the
-``data_type`` parameter (a PLC identifier) before forwarding to the session layer.
-"""
+"""Tests for inspect.get_tag_value and inspect.export_l5x (Task 19)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -41,7 +36,7 @@ async def test_get_tag_value_returns_err_on_session_error():
 
     session = AsyncMock()
     session.get_tag_value = AsyncMock(side_effect=SessionError("unsupported data_type 'WIDGET'"))
-    result = await get_tag_value(session, "x", "WIDGET")
+    result = await get_tag_value(session, "Controller/Tags/Tag[@Name='MyTag']", "WIDGET")
     assert result["ok"] is False
     assert "WIDGET" in result["error"]
 
@@ -66,6 +61,65 @@ async def test_get_tag_value_rejects_injected_data_type():
     assert result["ok"] is False
     assert bad_data_type in result["error"] or "data_type" in result["error"]
     session.get_tag_value.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Security — tag_xpath structural injection rejection
+# ---------------------------------------------------------------------------
+
+_INJECTION_XPATHS = [
+    # OR-predicate probing beyond contract
+    "Controller/Tags/Tag[@Name='T' or //SecretData]",
+    # contains() function call
+    "Controller/Tags/Tag[contains(@Name,'s')]",
+    # bare non-canonical path
+    "Tag[@Name='T' or //SecretData]",
+    # double-predicate (second predicate injected)
+    "Controller/Tags/Tag[@Name='T'][@DataType='REAL']",
+    # semicolon injection
+    "Controller/Tags/Tag[@Name='T'];rm -rf /",
+    # pipe / union injection
+    "Controller/Tags/Tag[@Name='T']|//SecretData",
+    # SQL-style comment suffix
+    "Controller/Tags/Tag[@Name='T']--comment",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_xpath", _INJECTION_XPATHS)
+async def test_get_tag_value_rejects_injected_tag_xpath(bad_xpath: str) -> None:
+    """tag_xpath must match a canonical template; injections must be rejected before
+    session.get_tag_value is awaited."""
+    session = AsyncMock()
+    session.get_tag_value = AsyncMock(return_value=0.0)
+    result = await get_tag_value(session, bad_xpath, "REAL")
+    assert result["ok"] is False, f"expected rejection for: {bad_xpath!r}"
+    session.get_tag_value.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_tag_value_rejects_invalid_mode() -> None:
+    """mode must be ONLINE or OFFLINE; any other value returns err_envelope."""
+    session = AsyncMock()
+    session.get_tag_value = AsyncMock(return_value=0.0)
+    result = await get_tag_value(session, "Controller/Tags/Tag[@Name='T']", "REAL", mode="BACKDOOR")
+    assert result["ok"] is False
+    assert "mode" in result["error"]
+    session.get_tag_value.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_tag_value_accepts_program_scoped_xpath() -> None:
+    """Program-scoped canonical form is accepted."""
+    session = AsyncMock()
+    session.get_tag_value = AsyncMock(return_value=7.0)
+    result = await get_tag_value(
+        session,
+        "Controller/Programs/Program[@Name='Main']/Tags/Tag[@Name='Speed']",
+        "REAL",
+    )
+    assert result["ok"] is True
+    assert result["data"]["value"] == 7.0
 
 
 # ---------------------------------------------------------------------------

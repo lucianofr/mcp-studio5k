@@ -17,10 +17,35 @@ PROGRAMS_XPATH = "Controller/Programs"
 # would accept "abc\n" but fullmatch correctly rejects it.
 _VALID_PLC_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,39}")
 
+# Canonical tag_xpath templates.  Only these two structural shapes are permitted;
+# the variable slot must satisfy _VALID_PLC_NAME.  A character-class whitelist is
+# intentionally NOT used: `Tag[@Name='T']` and `Tag[@Name='T' or //X]` share the
+# same characters, so a whitelist cannot distinguish them.
+_IDENT = r"[A-Za-z_][A-Za-z0-9_]{0,39}"
+_TAG_XPATH_PATTERNS = [
+    # Controller-scoped:  Controller/Tags/Tag[@Name='IDENT']
+    re.compile(rf"Controller/Tags/Tag\[@Name='{_IDENT}'\]"),
+    # Program-scoped:     Controller/Programs/Program[@Name='IDENT']/Tags/Tag[@Name='IDENT']
+    re.compile(rf"Controller/Programs/Program\[@Name='{_IDENT}'\]/Tags/Tag\[@Name='{_IDENT}'\]"),
+]
+
+_VALID_MODES = {"ONLINE", "OFFLINE"}
+
 
 def _validate_name(name: str, param: str) -> None:
     if not _VALID_PLC_NAME.fullmatch(name):
         raise ValueError(f"invalid {param}: {name!r}")
+
+
+def _validate_tag_xpath(tag_xpath: str) -> None:
+    """Raise ValueError when tag_xpath does not match a canonical safe template.
+
+    Accepted shapes (IDENT = ``[A-Za-z_][A-Za-z0-9_]{0,39}``):
+      - ``Controller/Tags/Tag[@Name='IDENT']``
+      - ``Controller/Programs/Program[@Name='IDENT']/Tags/Tag[@Name='IDENT']``
+    """
+    if not any(p.fullmatch(tag_xpath) for p in _TAG_XPATH_PATTERNS):
+        raise ValueError(f"invalid tag_xpath: {tag_xpath!r}")
 
 
 def strip_comments(l5x_content: str) -> str:
@@ -138,14 +163,22 @@ async def list_tags(
 async def get_tag_value(session, tag_xpath: str, data_type: str, mode: str = "OFFLINE") -> dict:
     """Read a typed tag value; typed dispatch lives in ProjectSession (rule 9).
 
-    Security: ``data_type`` is validated as a PLC identifier before forwarding.
-    ``tag_xpath`` is a full XPath expression whose structural validation is the
-    responsibility of ProjectSession (which owns the SDK boundary).
+    Security: ``tag_xpath`` is validated against canonical structural templates
+    before forwarding — a character-class whitelist cannot distinguish
+    ``Tag[@Name='T']`` from ``Tag[@Name='T' or //X]``.  ``data_type`` is
+    validated as a PLC identifier.  ``mode`` must be ``"ONLINE"`` or
+    ``"OFFLINE"``.
     """
+    try:
+        _validate_tag_xpath(tag_xpath)
+    except ValueError as exc:
+        return err_envelope(str(exc))
     try:
         _validate_name(data_type, "data_type")
     except ValueError as exc:
         return err_envelope(str(exc))
+    if mode not in _VALID_MODES:
+        return err_envelope(f"invalid mode: {mode!r}; must be one of {sorted(_VALID_MODES)}")
     try:
         value = await session.get_tag_value(tag_xpath, data_type, mode=mode)
     except SessionError as exc:
@@ -169,7 +202,7 @@ async def export_l5x(session, x_path: str, *, max_bytes: int) -> dict:
     """
     try:
         stripped = strip_comments(await session.partial_export(x_path))
-    except ValueError as exc:
+    except (ValueError, L5xParseError) as exc:
         return err_envelope(str(exc))
     size_bytes = len(stripped.encode("utf-8"))
     if size_bytes > max_bytes:
