@@ -29,3 +29,25 @@ def test_template_fbd_has_fbdcontent_sheet():
 def test_unknown_kind_raises_value_error():
     with pytest.raises(ValueError, match="unknown template kind"):
         get_l5x_template("scl")
+
+
+from mcp_studio5k.l5x.validate import validate_l5x
+
+
+@pytest.mark.parametrize("kind", ["st", "ld", "fbd"])
+def test_template_passes_validate_l5x(kind):
+    result = validate_l5x(get_l5x_template(kind))
+    assert result.ok, [(i.severity, i.message) for i in result.issues]
+
+
+def test_fbd_template_is_parseable_and_round_trips():
+    from mcp_studio5k.l5x.parse import parse_l5x
+
+    text = get_l5x_template("fbd")
+    root = parse_l5x(text.encode("utf-8"))
+    routine = root.find(".//Routine[@Type='FBD']")
+    assert routine is not None
+    sheet = routine.find(".//Sheet")
+    tags = [el.tag for el in sheet]
+    assert tags.count("Wire") == 2
+    assert "Block" in tags and "IRef" in tags and "OCon" in tags
