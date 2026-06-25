@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from mcp_studio5k.l5x.errors import ValidationIssue
 
+START_RUNG_NUMBER = 0
+
 
 def validate_rll(routine_el) -> tuple[ValidationIssue, ...]:
     """Validate an RLL <Routine>: requires <RLLContent> of <Rung> with <Text>."""
@@ -32,7 +34,7 @@ def validate_rll(routine_el) -> tuple[ValidationIssue, ...]:
         )
         return tuple(issues)
 
-    expected = 0
+    expected = START_RUNG_NUMBER
     for rung_el in rungs:
         raw_number = rung_el.get("Number")
         try:
