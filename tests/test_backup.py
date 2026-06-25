@@ -34,7 +34,8 @@ def test_make_verified_backup_aborts_when_insufficient_space(tmp_path, monkeypat
     backup_dir = tmp_path / "backups"
     with pytest.raises(BackupError):
         make_verified_backup(acd, backup_dir, rotation=10)
-    assert not list(backup_dir.glob("*.acd")) if backup_dir.exists() else True
+    # Explicitly assert no backup was produced: backup_dir must not exist or must contain no .acd files.
+    assert (not backup_dir.exists()) or (not list(backup_dir.glob("*.acd")))
 
 
 def test_make_verified_backup_raises_on_size_mismatch(tmp_path, monkeypatch):
@@ -86,3 +87,30 @@ def test_restore_backup_raises_when_backup_missing(tmp_path):
     acd = _make_acd(tmp_path / "Linha1.acd")
     with pytest.raises(BackupError):
         restore_backup(tmp_path / "nope.acd", acd)
+
+
+def test_restore_backup_does_not_modify_target_on_size_mismatch(tmp_path, monkeypatch):
+    # Target file original content.
+    original_content = b"ORIGINAL-ACD-DATA"
+    acd = _make_acd(tmp_path / "Linha1.acd", original_content)
+    original_size = len(original_content)
+
+    # Backup with different size (truncated after copy).
+    backup = tmp_path / "Linha1.bak.acd"
+    backup.write_bytes(b"BACKUP-DATA-12345")  # 17 bytes
+
+    real_copy2 = shutil.copy2
+
+    def truncating_copy2(src, dst, *args, **kwargs):
+        real_copy2(src, dst, *args, **kwargs)
+        Path(dst).write_bytes(b"SHORT")  # Truncate to 5 bytes
+
+    monkeypatch.setattr(shutil, "copy2", truncating_copy2)
+
+    # restore_backup should raise and NOT modify acd.
+    with pytest.raises(BackupError, match="restore size mismatch"):
+        restore_backup(backup, acd)
+
+    # Verify target is unchanged.
+    assert acd.read_bytes() == original_content
+    assert acd.stat().st_size == original_size

@@ -1,7 +1,9 @@
 """Verified backup with size check, disk-space guard, rotation, and restore."""
 from __future__ import annotations
 
+import os
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,7 +38,14 @@ def make_verified_backup(acd_path: Path, backup_dir: Path, *, rotation: int) -> 
             f"{source_size + _SPACE_MARGIN_BYTES}, have {free}"
         )
 
-    dest = backup_dir / f"{acd_path.stem}.{_timestamp()}.acd"
+    # Build destination path with collision guard: append counter if file exists.
+    base_dest = backup_dir / f"{acd_path.stem}.{_timestamp()}.acd"
+    dest = base_dest
+    counter = 0
+    while dest.exists():
+        counter += 1
+        dest = backup_dir / f"{acd_path.stem}.{_timestamp()}_{counter}.acd"
+
     shutil.copy2(acd_path, dest)
 
     if dest.stat().st_size != source_size:
@@ -61,9 +70,34 @@ def _enforce_rotation(backup_dir: Path, stem: str, rotation: int) -> None:
 
 
 def restore_backup(backup_path: Path, acd_path: Path) -> None:
-    """Restore a verified backup over the project .acd."""
+    """Atomically restore a verified backup over the project .acd.
+
+    Validates the backup size BEFORE replacing the target.
+    If validation fails, the target is left untouched.
+    """
     if not backup_path.is_file():
         raise BackupError(f"backup not found: {backup_path}")
-    shutil.copy2(backup_path, acd_path)
-    if acd_path.stat().st_size != backup_path.stat().st_size:
-        raise BackupError("restore size mismatch after copy")
+
+    backup_size = backup_path.stat().st_size
+
+    # Create a temporary file in the same directory as the target for atomic replacement.
+    acd_dir = acd_path.parent
+    fd, temp_path = tempfile.mkstemp(dir=acd_dir, prefix=".restore-", suffix=".tmp")
+    try:
+        os.close(fd)  # Close the file descriptor; we'll write via shutil.copy2.
+        shutil.copy2(backup_path, temp_path)
+
+        # Verify size BEFORE overwriting target.
+        temp_size = Path(temp_path).stat().st_size
+        if temp_size != backup_size:
+            Path(temp_path).unlink(missing_ok=True)
+            raise BackupError(
+                f"restore size mismatch: backup={backup_size}, temp={temp_size}"
+            )
+
+        # Atomically replace target with verified temp file.
+        os.replace(temp_path, acd_path)
+    except Exception:
+        # Clean up temp file on any error.
+        Path(temp_path).unlink(missing_ok=True)
+        raise
