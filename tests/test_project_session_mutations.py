@@ -217,3 +217,50 @@ async def test_save_as_writes_with_overwrite(tmp_path):
     target = cfg.project_root / "Copy.acd"
     await session.save_as(target, overwrite=True)
     assert any(c.startswith("save_as:") for c in FakeLogixProject.calls)
+
+
+# ---------------------------------------------------------------------------
+# I3 — partial_export temp cleanup on error
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_partial_export_temp_cleaned_on_sdk_error(tmp_path, monkeypatch):
+    """If the SDK export call raises, no *.L5X temp file is left in backup_dir."""
+    cfg, session, acd = await _open_session(tmp_path)
+
+    async def _failing_export(x_path, file_path):
+        raise RuntimeError("SDK export failed")
+
+    monkeypatch.setattr(session._project, "partial_export_to_xml_file", _failing_export)
+
+    with pytest.raises(Exception):
+        await session.partial_export("Controller/Programs")
+
+    assert not list(cfg.backup_dir.glob("*.L5X")), "temp .L5X leaked after export error"
+
+
+# ---------------------------------------------------------------------------
+# I4 — save_as path-traversal rejection and rollback on SDK failure
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_save_as_rejects_path_traversal(tmp_path):
+    """A save_path that escapes project_root raises SessionError."""
+    cfg, session, acd = await _open_session(tmp_path)
+    with pytest.raises(SessionError):
+        await session.save_as("../escape.acd")
+
+
+@pytest.mark.asyncio
+async def test_save_as_failure_raises_session_error_and_restores(tmp_path):
+    """SDK save_as failure → SessionError raised AND original .acd bytes intact."""
+    cfg, session, acd = await _open_session(tmp_path)
+    original_bytes = acd.read_bytes()
+    FakeLogixProject.fail_save_as = True
+    target = cfg.project_root / "Copy.acd"
+    with pytest.raises(SessionError):
+        await session.save_as(target, overwrite=True)
+    # The original .acd must be intact (rollback succeeded).
+    assert acd.read_bytes() == original_bytes
+    # Session must be invalidated after the failed write.
+    assert session.status()["active"] is False

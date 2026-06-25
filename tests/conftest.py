@@ -11,6 +11,7 @@ class FakeLogixProject:
     fail_open = False
     fail_import = False
     fail_save = False
+    fail_save_as = False
     calls: list[str] = []
 
     def __init__(self, project_file_path: str) -> None:
@@ -45,6 +46,8 @@ class FakeLogixProject:
     async def save_as(self, save_path, force=False, detailed_l5x=False):
         await asyncio.sleep(0)
         FakeLogixProject.calls.append(f"save_as:{save_path}:{force}:{detailed_l5x}")
+        if FakeLogixProject.fail_save_as:
+            raise RuntimeError("SDK save_as failed")
 
     async def close(self):
         await asyncio.sleep(0)
@@ -59,6 +62,11 @@ class FakeLogixProject:
         self, x_path, xml_file_to_import, collision_option, continue_on_errors=False
     ):
         await asyncio.sleep(0)
+        # xml_file_to_import is a FILE PATH (U1 fix); read content for traceability.
+        try:
+            _content = Path(xml_file_to_import).read_text(encoding="utf-8")
+        except OSError:
+            _content = ""
         FakeLogixProject.calls.append(f"import:{x_path}:{collision_option}")
         if FakeLogixProject.fail_import:
             raise RuntimeError("SDK import failed")
@@ -79,6 +87,7 @@ def reset_fake() -> None:
     FakeLogixProject.fail_open = False
     FakeLogixProject.fail_import = False
     FakeLogixProject.fail_save = False
+    FakeLogixProject.fail_save_as = False
     FakeLogixProject.calls = []
 
 

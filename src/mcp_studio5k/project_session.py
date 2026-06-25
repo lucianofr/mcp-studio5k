@@ -120,7 +120,7 @@ class ProjectSession:
         await self._project.close()
         self._project = await self._sdk_cls.open_logix_project(str(path))
 
-    async def _invalidate(self) -> None:
+    def _invalidate(self) -> None:
         """Clear session state after a rollback."""
         self._project = None
         self._path = None
@@ -153,22 +153,42 @@ class ProjectSession:
                 )
 
             acd_path = self._path
-            backup = make_verified_backup(
-                acd_path,
-                self._config.backup_dir,
-                rotation=self._config.backup_rotation,
+            try:
+                backup = make_verified_backup(
+                    acd_path,
+                    self._config.backup_dir,
+                    rotation=self._config.backup_rotation,
+                )
+            except BackupError as exc:
+                raise SessionError(f"cannot create backup before write: {exc}") from exc
+
+            # Write L5X content to a temp file; SDK expects a file path, not raw XML.
+            self._config.backup_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp_l5x = tempfile.mkstemp(
+                suffix=".L5X", dir=str(self._config.backup_dir)
             )
             try:
-                await self._project.partial_import_from_xml_file(
-                    x_path, l5x_content, collision_option
-                )
-                await self._reopen()
-            except Exception as exc:
-                restore_backup(backup, acd_path)
-                await self._invalidate()
-                raise SessionError(
-                    f"import failed and was rolled back: {exc}"
-                ) from exc
+                os.close(fd)
+                Path(tmp_l5x).write_text(l5x_content, encoding="utf-8")
+                try:
+                    await self._project.partial_import_from_xml_file(
+                        x_path, tmp_l5x, collision_option
+                    )
+                    await self._reopen()
+                except Exception as exc:
+                    try:
+                        restore_backup(backup, acd_path)
+                    except Exception:
+                        pass  # cannot restore; still invalidate so no corrupted session is handed out
+                    self._invalidate()
+                    raise SessionError(
+                        f"import failed and was rolled back: {exc}"
+                    ) from exc
+            finally:
+                try:
+                    os.remove(tmp_l5x)
+                except OSError:
+                    pass
             self._write_count += 1
 
     async def save(self, *, expected_project_path: "Path | None" = None) -> None:
@@ -177,17 +197,24 @@ class ProjectSession:
             self._require_active(expected_project_path)
 
             acd_path = self._path
-            backup = make_verified_backup(
-                acd_path,
-                self._config.backup_dir,
-                rotation=self._config.backup_rotation,
-            )
+            try:
+                backup = make_verified_backup(
+                    acd_path,
+                    self._config.backup_dir,
+                    rotation=self._config.backup_rotation,
+                )
+            except BackupError as exc:
+                raise SessionError(f"cannot create backup before write: {exc}") from exc
+
             try:
                 await self._project.save()
                 await self._reopen()
             except Exception as exc:
-                restore_backup(backup, acd_path)
-                await self._invalidate()
+                try:
+                    restore_backup(backup, acd_path)
+                except Exception:
+                    pass  # cannot restore; still invalidate so no corrupted session is handed out
+                self._invalidate()
                 raise SessionError(
                     f"save failed and was rolled back: {exc}"
                 ) from exc
@@ -239,10 +266,11 @@ class ProjectSession:
     async def save_as(
         self, save_path: "Path | str", *, overwrite: bool = False
     ) -> None:
-        """Save the project to a new path under project_root.
+        """Save the project to a new path under project_root with backup→verify→rollback.
 
         Resolves and validates save_path under project_root (no traversal).
         Refuses to overwrite an existing file unless overwrite=True.
+        On SDK failure: restores backup, invalidates session, raises SessionError.
         """
         resolved = resolve_under_root(save_path, self._config.project_root)
         async with self._lock:
@@ -252,4 +280,26 @@ class ProjectSession:
                 raise SessionError(
                     f"refuse to overwrite existing file: {resolved}"
                 )
-            await self._project.save_as(str(resolved), force=overwrite)
+
+            acd_path = self._path
+            try:
+                backup = make_verified_backup(
+                    acd_path,
+                    self._config.backup_dir,
+                    rotation=self._config.backup_rotation,
+                )
+            except BackupError as exc:
+                raise SessionError(f"cannot create backup before write: {exc}") from exc
+
+            try:
+                await self._project.save_as(str(resolved), force=overwrite)
+            except Exception as exc:
+                try:
+                    restore_backup(backup, acd_path)
+                except Exception:
+                    pass  # cannot restore; still invalidate so no corrupted session is handed out
+                self._invalidate()
+                raise SessionError(
+                    f"save_as failed and was rolled back: {exc}"
+                ) from exc
+            self._write_count += 1
