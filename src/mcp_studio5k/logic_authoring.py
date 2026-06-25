@@ -15,13 +15,16 @@ preview_import:     Export the current routine, diff against the proposed L5X,
 from __future__ import annotations
 
 import hashlib
+import hmac
 import re
+import time
 
 from .envelope import err_envelope, ok_envelope
 from .inspect import strip_comments
 from .l5x.diff import diff_routines
 from .l5x.parse import parse_l5x
 from .l5x.validate import validate_l5x
+from .safety import RateLimitError, check_safety_exclusions
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -164,4 +167,82 @@ async def preview_import(
             "change_token": token,
             "x_path": x_path,
         }
+    )
+
+
+# ---------------------------------------------------------------------------
+# import_l5x — human-confirmation gate (Task 21)
+# ---------------------------------------------------------------------------
+
+_ALLOWED_COLLISION = frozenset({"CANCEL_ON_COLL", "DISCARD_ON_COLL"})
+
+
+async def import_l5x(
+    session,
+    l5x_content: str,
+    x_path: str,
+    *,
+    collision_option: str = "CANCEL_ON_COLL",
+    confirmed: bool = False,
+    change_token: "str | None" = None,
+    expected_change_token: "str | None",
+    exclusions,
+    rate_limiter,
+    max_bytes: int,
+    salt: str,
+    now: "float | None" = None,
+) -> dict:
+    """Apply an L5X import after passing all security and human-confirmation guards.
+
+    Guard order (each failing guard returns err_envelope with NO write):
+      1. confirmed must be True (human gate)
+      2. change_token must match recomputed token (constant-time via hmac.compare_digest)
+      3. collision_option must be in _ALLOWED_COLLISION
+      4. l5x_content byte size must be <= max_bytes
+      5. safety exclusions must not be touched
+      6. rate limiter must allow the call
+      7. apply (session.apply_l5x_import awaited exactly once)
+    """
+    # Guard 1: human confirmation gate
+    if confirmed is not True:
+        return err_envelope("import refused: confirmed=True is required (human gate)")
+
+    # Guard 2: change_token must match recomputed token (constant-time compare)
+    recomputed = make_change_token(l5x_content, x_path, salt=salt)
+    if not change_token or not hmac.compare_digest(change_token, recomputed):
+        return err_envelope(
+            "import refused: change_token missing or does not match a recent preview_import"
+        )
+
+    # Guard 3: collision option allowlist
+    if collision_option not in _ALLOWED_COLLISION:
+        return err_envelope(
+            f"import refused: collision_option must be one of {sorted(_ALLOWED_COLLISION)}"
+            " (OVERWRITE_ON_COLL requires a separate human step)"
+        )
+
+    # Guard 4: size ceiling
+    if len(l5x_content.encode("utf-8")) > max_bytes:
+        return err_envelope(
+            f"import refused: l5x_content size exceeds max_bytes ({max_bytes})"
+        )
+
+    # Guard 5: safety exclusions
+    hits = check_safety_exclusions(l5x_content, exclusions)
+    if hits:
+        return err_envelope(
+            "import refused: content touches safety-excluded tags: "
+            + ", ".join(sorted(hits))
+        )
+
+    # Guard 6: rate limit
+    try:
+        rate_limiter.check(now=now if now is not None else time.monotonic())
+    except RateLimitError as exc:
+        return err_envelope(f"import refused: {exc}")
+
+    # All guards passed — apply exactly once
+    await session.apply_l5x_import(l5x_content, x_path, collision_option)
+    return ok_envelope(
+        {"applied": True, "x_path": x_path, "collision_option": collision_option}
     )
