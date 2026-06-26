@@ -40,3 +40,14 @@ async def test_writable_exposes_write_tools():
         assert write_tool in names
     import_tool = next(t for t in tools if t.name == "import_l5x")
     assert import_tool.annotations.destructiveHint is True
+
+
+@pytest.mark.asyncio
+async def test_template_resource_returns_template(monkeypatch):
+    import mcp_studio5k.server as server_mod
+
+    monkeypatch.setattr(server_mod, "get_l5x_template", lambda kind: f"<Routine Type='{kind.upper()}'/>")
+    mcp = build_server(_config(read_only=True), _session())
+    async with Client(mcp) as client:
+        contents = await client.read_resource("l5x://template/st")
+    assert contents[0].text == "<Routine Type='ST'/>"
