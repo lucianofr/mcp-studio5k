@@ -16,9 +16,13 @@ ENV_BACKUP_DIR = "MCP_S5K_BACKUP_DIR"
 ENV_READ_ONLY = "MCP_S5K_READ_ONLY"
 ENV_ALLOWED_PROPS = "MCP_S5K_ALLOWED_PROPS"
 ENV_SAFETY_EXCLUSIONS = "MCP_S5K_SAFETY_EXCLUSIONS"
+ENV_CHANGE_TOKEN_SALT = "MCP_S5K_CHANGE_TOKEN_SALT"
 
 READ_ONLY_DISABLE_TOKEN = "false"
 ALLOWLIST_SEPARATOR = ","
+# A weak salt lets anyone who knows content+xpath forge a change_token, so a
+# writable deployment must supply a strong server-held secret.
+MIN_CHANGE_TOKEN_SALT_LENGTH = 16
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,8 @@ class Config:
     allowed_property_names: frozenset[str] = field(default_factory=frozenset)
     safety_tag_exclusions: frozenset[str] = field(default_factory=frozenset)
     max_l5x_bytes: int = DEFAULT_MAX_L5X_BYTES
+    max_export_bytes: int = DEFAULT_MAX_L5X_BYTES
+    change_token_salt: str = ""
     write_limit_per_session: int = DEFAULT_WRITE_LIMIT_PER_SESSION
     cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS
     backup_rotation: int = DEFAULT_BACKUP_ROTATION
@@ -76,11 +82,24 @@ def load_config() -> Config:
         / "logs"
     ).resolve()
 
+    read_only = _parse_read_only(os.environ.get(ENV_READ_ONLY))
+
+    # The change-token salt is a server-held secret. A read-only server never mints
+    # tokens, so an empty salt is tolerated there; a writable server must supply a
+    # strong one, and we fail loud at startup rather than at first write.
+    change_token_salt = os.environ.get(ENV_CHANGE_TOKEN_SALT, "")
+    if not read_only and len(change_token_salt) < MIN_CHANGE_TOKEN_SALT_LENGTH:
+        raise ValueError(
+            f"{ENV_CHANGE_TOKEN_SALT} must be set to at least "
+            f"{MIN_CHANGE_TOKEN_SALT_LENGTH} characters when read_only is disabled"
+        )
+
     return Config(
         project_root=project_root,
         backup_dir=backup_dir,
         log_dir=log_dir,
-        read_only=_parse_read_only(os.environ.get(ENV_READ_ONLY)),
+        read_only=read_only,
         allowed_property_names=_parse_allowlist(os.environ.get(ENV_ALLOWED_PROPS)),
         safety_tag_exclusions=_parse_allowlist(os.environ.get(ENV_SAFETY_EXCLUSIONS)),
+        change_token_salt=change_token_salt,
     )

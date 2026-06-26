@@ -201,3 +201,18 @@ async def test_format_issues_getattr_path():
     assert result2 == "default_val"
     formatted = _format_issues([issue])
     assert "bad" in formatted
+
+
+@pytest.mark.asyncio
+async def test_save_project_is_rate_limited():
+    # Second save within the cooldown window must be refused, not silently applied.
+    sess = _session()
+    mcp = build_server(_config(read_only=False), sess)
+    async with Client(mcp) as client:
+        first = await client.call_tool("save_project", {})
+        second = await client.call_tool("save_project", {})
+    first_text = first.content[0].text if hasattr(first, "content") else str(first)
+    second_text = second.content[0].text if hasattr(second, "content") else str(second)
+    assert "saved" in first_text
+    assert "refused" in second_text.lower() or "cooldown" in second_text.lower()
+    sess.save.assert_awaited_once()

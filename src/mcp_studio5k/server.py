@@ -9,7 +9,8 @@ from . import logic_authoring as la
 from .envelope import err_envelope, ok_envelope
 from .l5x.templates import get_l5x_template
 from .l5x.validate import validate_l5x as _validate_l5x
-from .safety import WriteRateLimiter
+from .project_session import SessionError
+from .safety import RateLimitError, WriteRateLimiter
 
 _READ_ONLY = {"readOnlyHint": True, "idempotentHint": True}
 _DESTRUCTIVE = {"destructiveHint": True}
@@ -57,7 +58,7 @@ def build_server(config, session) -> FastMCP:
 def _register_write_tools(mcp, config, session, rate_limiter) -> None:
     @mcp.tool(annotations={"readOnlyHint": True})
     async def validate_l5x(l5x_content: str) -> dict:
-        result = _validate_l5x(l5x_content)
+        result = _validate_l5x(l5x_content, max_bytes=config.max_export_bytes)
         if result.ok:
             return ok_envelope({"valid": True})
         return err_envelope("; ".join(str(i) for i in result.issues))
@@ -87,14 +88,30 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
 
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def save_project() -> dict:
-        await session.save()
+        # Persisting to disk is a write: subject it to the same cooldown as imports
+        # and surface session failures as refusal envelopes, never raw exceptions.
+        try:
+            rate_limiter.check(now=time.monotonic())
+        except RateLimitError as exc:
+            return err_envelope(f"save refused: {exc}")
+        try:
+            await session.save()
+        except SessionError as exc:
+            return err_envelope(str(exc))
         return ok_envelope({"saved": True})
 
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def save_project_as(path: str, overwrite: bool = False) -> dict:
         if not overwrite:
             return err_envelope("refuse to overwrite without overwrite=True")
-        await session.save_as(path, overwrite=overwrite)
+        try:
+            rate_limiter.check(now=time.monotonic())
+        except RateLimitError as exc:
+            return err_envelope(f"save refused: {exc}")
+        try:
+            await session.save_as(path, overwrite=overwrite)
+        except SessionError as exc:
+            return err_envelope(str(exc))
         return ok_envelope({"saved_as": path})
 
 

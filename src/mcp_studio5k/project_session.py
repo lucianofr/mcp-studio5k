@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp_studio5k.backup import BackupError, make_verified_backup, restore_backup
-from mcp_studio5k.safety import check_safety_exclusions
+from mcp_studio5k.safety import SafetyError, check_safety_exclusions
 
 UNC_PREFIXES = ("\\\\", "//")
 
@@ -142,11 +142,16 @@ class ProjectSession:
             self._require_active(expected_project_path)
 
             # Safety check BEFORE backup — never touch disk on exclusion hit.
-            touched = check_safety_exclusions(
-                l5x_content,
-                self._config.safety_tag_exclusions,
-                max_bytes=self._config.max_l5x_bytes,
-            )
+            # A DOCTYPE/oversize/malformed payload raises SafetyError; surface it as
+            # a SessionError so the caller sees a clean failure, not a raw exception.
+            try:
+                touched = check_safety_exclusions(
+                    l5x_content,
+                    self._config.safety_tag_exclusions,
+                    max_bytes=self._config.max_l5x_bytes,
+                )
+            except SafetyError as exc:
+                raise SessionError(f"unsafe L5X import refused: {exc}") from exc
             if touched:
                 raise SessionError(
                     f"import would touch excluded safety tags: {touched}"

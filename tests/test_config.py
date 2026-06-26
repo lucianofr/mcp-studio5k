@@ -10,6 +10,7 @@ ENV_BACKUP_DIR = "MCP_S5K_BACKUP_DIR"
 ENV_READ_ONLY = "MCP_S5K_READ_ONLY"
 ENV_ALLOWED_PROPS = "MCP_S5K_ALLOWED_PROPS"
 ENV_SAFETY_EXCLUSIONS = "MCP_S5K_SAFETY_EXCLUSIONS"
+ENV_CHANGE_TOKEN_SALT = "MCP_S5K_CHANGE_TOKEN_SALT"
 
 
 def test_config_is_frozen_immutable():
@@ -41,6 +42,7 @@ def test_config_safe_defaults():
 def _set_required_env(monkeypatch, root: Path, backup: Path):
     monkeypatch.setenv(ENV_PROJECT_ROOT, str(root))
     monkeypatch.setenv(ENV_BACKUP_DIR, str(backup))
+    monkeypatch.setenv(ENV_CHANGE_TOKEN_SALT, "test-salt-0123456789")
 
 
 def test_load_config_resolves_existing_dirs(tmp_path, monkeypatch):
@@ -104,3 +106,30 @@ def test_nonexistent_project_root_raises(tmp_path, monkeypatch):
     _set_required_env(monkeypatch, tmp_path / "missing", backup)
     with pytest.raises(ValueError, match="project_root"):
         load_config()
+
+
+def test_writable_config_requires_strong_salt(monkeypatch, tmp_path):
+    # A writable deployment with no/weak salt must fail loud at startup.
+    root = tmp_path / "proj"
+    backup = tmp_path / "bak"
+    root.mkdir()
+    backup.mkdir()
+    _set_required_env(monkeypatch, root, backup)
+    monkeypatch.setenv(ENV_READ_ONLY, "false")
+    monkeypatch.delenv(ENV_CHANGE_TOKEN_SALT, raising=False)
+    with pytest.raises(ValueError):
+        load_config()
+
+
+def test_read_only_config_tolerates_missing_salt(monkeypatch, tmp_path):
+    # A read-only server never mints tokens, so an empty salt is acceptable.
+    root = tmp_path / "proj"
+    backup = tmp_path / "bak"
+    root.mkdir()
+    backup.mkdir()
+    _set_required_env(monkeypatch, root, backup)
+    monkeypatch.setenv(ENV_READ_ONLY, "true")
+    monkeypatch.delenv(ENV_CHANGE_TOKEN_SALT, raising=False)
+    cfg = load_config()
+    assert cfg.read_only is True
+    assert cfg.change_token_salt == ""

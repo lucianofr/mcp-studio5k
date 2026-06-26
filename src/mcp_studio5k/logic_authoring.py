@@ -24,7 +24,7 @@ from .inspect import strip_comments
 from .l5x.diff import diff_routines
 from .l5x.parse import parse_l5x
 from .l5x.validate import validate_l5x
-from .safety import RateLimitError, check_safety_exclusions
+from .safety import RateLimitError, SafetyError, check_safety_exclusions
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -238,8 +238,13 @@ async def import_l5x(
             f"import refused: l5x_content size exceeds max_bytes ({max_bytes})"
         )
 
-    # Guard 5: safety exclusions
-    hits = check_safety_exclusions(l5x_content, exclusions)
+    # Guard 5: safety exclusions. check_safety_exclusions raises SafetyError on a
+    # DOCTYPE/oversize/malformed payload; convert that to a refusal envelope so the
+    # gate never leaks an unhandled exception to the caller.
+    try:
+        hits = check_safety_exclusions(l5x_content, exclusions, max_bytes=max_bytes)
+    except SafetyError as exc:
+        return err_envelope(f"import refused: {exc}")
     if hits:
         return err_envelope(
             "import refused: content touches safety-excluded tags: "
