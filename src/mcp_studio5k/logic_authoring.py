@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+import time
 
 from .envelope import err_envelope, ok_envelope
 from .inspect import strip_comments
@@ -247,7 +248,10 @@ async def import_l5x(
 
     # Guard 6: rate limit
     try:
-        rate_limiter.check(now=now)
+        # Fall back to a real monotonic clock when the caller omits `now`.
+        # Passing now=None would leave WriteRateLimiter._last_write unset and
+        # fail-open (cooldown never engages), so the gate always supplies a float.
+        rate_limiter.check(now=now if now is not None else time.monotonic())
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
