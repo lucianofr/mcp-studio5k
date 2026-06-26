@@ -51,3 +51,16 @@ async def test_template_resource_returns_template(monkeypatch):
     async with Client(mcp) as client:
         contents = await client.read_resource("l5x://template/st")
     assert contents[0].text == "<Routine Type='ST'/>"
+
+
+@pytest.mark.asyncio
+async def test_author_routine_prompt_registered():
+    mcp = build_server(_config(read_only=True), _session())
+    async with Client(mcp) as client:
+        prompts = await client.list_prompts()
+        names = {p.name for p in prompts}
+        assert "author_routine" in names
+        rendered = await client.get_prompt("author_routine", {"routine_type": "ST"})
+    joined = " ".join(m.content.text for m in rendered.messages if hasattr(m.content, "text"))
+    assert "preview_import" in joined
+    assert "confirmed=True" in joined
