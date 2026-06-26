@@ -11,6 +11,8 @@ ENV_READ_ONLY = "MCP_S5K_READ_ONLY"
 ENV_ALLOWED_PROPS = "MCP_S5K_ALLOWED_PROPS"
 ENV_SAFETY_EXCLUSIONS = "MCP_S5K_SAFETY_EXCLUSIONS"
 ENV_CHANGE_TOKEN_SALT = "MCP_S5K_CHANGE_TOKEN_SALT"
+ENV_MAX_L5X_BYTES = "MCP_S5K_MAX_L5X_BYTES"
+ENV_MAX_EXPORT_BYTES = "MCP_S5K_MAX_EXPORT_BYTES"
 
 
 def test_config_is_frozen_immutable():
@@ -118,6 +120,64 @@ def test_writable_config_requires_strong_salt(monkeypatch, tmp_path):
     monkeypatch.setenv(ENV_READ_ONLY, "false")
     monkeypatch.delenv(ENV_CHANGE_TOKEN_SALT, raising=False)
     with pytest.raises(ValueError):
+        load_config()
+
+
+def test_max_bytes_default_when_env_absent(tmp_path, monkeypatch):
+    root = tmp_path / "proj"
+    backup = tmp_path / "backup"
+    root.mkdir()
+    backup.mkdir()
+    _set_required_env(monkeypatch, root, backup)
+    monkeypatch.delenv(ENV_MAX_L5X_BYTES, raising=False)
+    monkeypatch.delenv(ENV_MAX_EXPORT_BYTES, raising=False)
+
+    cfg = load_config()
+
+    assert cfg.max_l5x_bytes == 5_000_000
+    assert cfg.max_export_bytes == 5_000_000
+
+
+def test_max_l5x_bytes_override_lifts_both_caps(tmp_path, monkeypatch):
+    root = tmp_path / "proj"
+    backup = tmp_path / "backup"
+    root.mkdir()
+    backup.mkdir()
+    _set_required_env(monkeypatch, root, backup)
+    monkeypatch.setenv(ENV_MAX_L5X_BYTES, "20000000")
+    monkeypatch.delenv(ENV_MAX_EXPORT_BYTES, raising=False)
+
+    cfg = load_config()
+
+    # Export cap inherits the import override when its own env is unset.
+    assert cfg.max_l5x_bytes == 20_000_000
+    assert cfg.max_export_bytes == 20_000_000
+
+
+def test_max_export_bytes_independent_override(tmp_path, monkeypatch):
+    root = tmp_path / "proj"
+    backup = tmp_path / "backup"
+    root.mkdir()
+    backup.mkdir()
+    _set_required_env(monkeypatch, root, backup)
+    monkeypatch.setenv(ENV_MAX_L5X_BYTES, "8000000")
+    monkeypatch.setenv(ENV_MAX_EXPORT_BYTES, "12000000")
+
+    cfg = load_config()
+
+    assert cfg.max_l5x_bytes == 8_000_000
+    assert cfg.max_export_bytes == 12_000_000
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc", "3.5"])
+def test_invalid_max_bytes_fails_loud(tmp_path, monkeypatch, bad):
+    root = tmp_path / "proj"
+    backup = tmp_path / "backup"
+    root.mkdir()
+    backup.mkdir()
+    _set_required_env(monkeypatch, root, backup)
+    monkeypatch.setenv(ENV_MAX_L5X_BYTES, bad)
+    with pytest.raises(ValueError, match=ENV_MAX_L5X_BYTES):
         load_config()
 
 

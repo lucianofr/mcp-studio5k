@@ -7,7 +7,7 @@ from urllib.parse import quote
 from lxml import etree
 
 from .envelope import Meta, err_envelope, ok_envelope
-from .l5x.parse import L5xParseError, parse_l5x
+from .l5x.parse import DEFAULT_MAX_L5X_BYTES, L5xParseError, parse_l5x
 from .project_session import SessionError
 
 PROGRAMS_XPATH = "Controller/Programs"
@@ -48,8 +48,8 @@ def _validate_tag_xpath(tag_xpath: str) -> None:
         raise ValueError(f"invalid tag_xpath: {tag_xpath!r}")
 
 
-def strip_comments(l5x_content: str) -> str:
-    root = parse_l5x(l5x_content)
+def strip_comments(l5x_content: str, *, max_bytes: int = DEFAULT_MAX_L5X_BYTES) -> str:
+    root = parse_l5x(l5x_content, max_bytes=max_bytes)
     for comment in root.findall(".//Comment"):
         comment.getparent().remove(comment)
     return etree.tostring(root, encoding="unicode")
@@ -79,10 +79,15 @@ def _paginate(items: list, page_size: int, cursor: "str | None"):
     return window, next_cursor, total
 
 
-async def list_programs(session, *, page_size: int = 100, cursor: "str | None" = None) -> dict:
+async def list_programs(
+    session, *, page_size: int = 100, cursor: "str | None" = None,
+    max_bytes: int = DEFAULT_MAX_L5X_BYTES,
+) -> dict:
     try:
-        xml = strip_comments(await session.partial_export(PROGRAMS_XPATH))
-        root = parse_l5x(xml)
+        xml = strip_comments(
+            await session.partial_export(PROGRAMS_XPATH), max_bytes=max_bytes
+        )
+        root = parse_l5x(xml, max_bytes=max_bytes)
         programs = [
             {"name": el.get("Name"), "data_type": None, "scope": "controller"}
             for el in root.findall(".//Programs/Program")
@@ -102,12 +107,15 @@ def _routines_xpath(program: str) -> str:
 
 
 async def list_routines(
-    session, program: str, *, page_size: int = 100, cursor: "str | None" = None
+    session, program: str, *, page_size: int = 100, cursor: "str | None" = None,
+    max_bytes: int = DEFAULT_MAX_L5X_BYTES,
 ) -> dict:
     try:
         _validate_name(program, "program")
-        xml = strip_comments(await session.partial_export(_routines_xpath(program)))
-        root = parse_l5x(xml)
+        xml = strip_comments(
+            await session.partial_export(_routines_xpath(program)), max_bytes=max_bytes
+        )
+        root = parse_l5x(xml, max_bytes=max_bytes)
         routines = [
             {"name": el.get("Name"), "data_type": el.get("Type"), "scope": program}
             for el in root.findall(".//Routines/Routine")
@@ -135,12 +143,15 @@ async def list_tags(
     name_filter: "str | None" = None,
     page_size: int = 100,
     cursor: "str | None" = None,
+    max_bytes: int = DEFAULT_MAX_L5X_BYTES,
 ) -> dict:
     try:
         if scope != "controller":
             _validate_name(scope, "scope")
-        xml = strip_comments(await session.partial_export(_tags_xpath(scope)))
-        root = parse_l5x(xml)
+        xml = strip_comments(
+            await session.partial_export(_tags_xpath(scope)), max_bytes=max_bytes
+        )
+        root = parse_l5x(xml, max_bytes=max_bytes)
         needle = name_filter.lower() if name_filter else None
         tags = [
             {"name": el.get("Name"), "data_type": el.get("DataType"), "scope": scope}

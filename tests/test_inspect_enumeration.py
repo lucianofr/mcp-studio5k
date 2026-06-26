@@ -174,3 +174,40 @@ async def test_list_programs_rejects_negative_cursor(mock_session):
     result = await list_programs(mock_session, cursor=negative_cursor)
     assert result["ok"] is False
     assert "cursor" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# max_bytes threading — cap reaches strip_comments + parse_l5x
+# ---------------------------------------------------------------------------
+
+
+def test_strip_comments_honors_max_bytes():
+    from mcp_studio5k.l5x.parse import L5xParseError
+
+    xml = "<RSLogix5000Content><Controller/></RSLogix5000Content>"
+    with pytest.raises(L5xParseError, match="exceeds max_bytes"):
+        strip_comments(xml, max_bytes=10)
+
+
+@pytest.mark.asyncio
+async def test_list_programs_tiny_max_bytes_is_refused(mock_session):
+    mock_session._routes["Programs"] = "programs_export.L5X"
+    result = await list_programs(mock_session, max_bytes=10)
+    assert result["ok"] is False
+    assert "exceeds max_bytes" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_list_routines_tiny_max_bytes_is_refused(mock_session):
+    mock_session._routes["Routines"] = "routines_export.L5X"
+    result = await list_routines(mock_session, "MainProgram", max_bytes=10)
+    assert result["ok"] is False
+    assert "exceeds max_bytes" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_list_tags_tiny_max_bytes_is_refused(mock_session):
+    mock_session._routes["Tags"] = "tags_export.L5X"
+    result = await list_tags(mock_session, "controller", max_bytes=10)
+    assert result["ok"] is False
+    assert "exceeds max_bytes" in result["error"]

@@ -25,18 +25,24 @@ def build_server(config, session) -> FastMCP:
 
     @mcp.tool(annotations=_READ_ONLY)
     async def list_programs(page_size: int = 100, cursor: "str | None" = None) -> dict:
-        return await inspect_mod.list_programs(session, page_size=page_size, cursor=cursor)
+        return await inspect_mod.list_programs(
+            session, page_size=page_size, cursor=cursor, max_bytes=config.max_l5x_bytes
+        )
 
     @mcp.tool(annotations=_READ_ONLY)
     async def list_routines(program: str, page_size: int = 100, cursor: "str | None" = None) -> dict:
-        return await inspect_mod.list_routines(session, program, page_size=page_size, cursor=cursor)
+        return await inspect_mod.list_routines(
+            session, program, page_size=page_size, cursor=cursor,
+            max_bytes=config.max_l5x_bytes,
+        )
 
     @mcp.tool(annotations=_READ_ONLY)
     async def list_tags(
         scope: str, name_filter: "str | None" = None, page_size: int = 100, cursor: "str | None" = None
     ) -> dict:
         return await inspect_mod.list_tags(
-            session, scope, name_filter=name_filter, page_size=page_size, cursor=cursor
+            session, scope, name_filter=name_filter, page_size=page_size, cursor=cursor,
+            max_bytes=config.max_l5x_bytes,
         )
 
     @mcp.tool(annotations=_READ_ONLY)

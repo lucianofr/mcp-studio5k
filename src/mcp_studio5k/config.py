@@ -17,6 +17,8 @@ ENV_READ_ONLY = "MCP_S5K_READ_ONLY"
 ENV_ALLOWED_PROPS = "MCP_S5K_ALLOWED_PROPS"
 ENV_SAFETY_EXCLUSIONS = "MCP_S5K_SAFETY_EXCLUSIONS"
 ENV_CHANGE_TOKEN_SALT = "MCP_S5K_CHANGE_TOKEN_SALT"
+ENV_MAX_L5X_BYTES = "MCP_S5K_MAX_L5X_BYTES"
+ENV_MAX_EXPORT_BYTES = "MCP_S5K_MAX_EXPORT_BYTES"
 
 READ_ONLY_DISABLE_TOKEN = "false"
 ALLOWLIST_SEPARATOR = ","
@@ -65,6 +67,20 @@ def _parse_read_only(raw: str | None) -> bool:
     return raw.strip().lower() != READ_ONLY_DISABLE_TOKEN
 
 
+def _parse_positive_int(raw: str | None, default: int, label: str) -> int:
+    # Fail safe: an unset/blank value keeps the conservative default. A present but
+    # non-numeric or non-positive value is an operator error, so fail loud at startup.
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a positive integer, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{label} must be a positive integer, got {value}")
+    return value
+
+
 def _parse_allowlist(raw: str | None) -> frozenset[str]:
     if raw is None:
         return frozenset()
@@ -94,6 +110,15 @@ def load_config() -> Config:
             f"{MIN_CHANGE_TOKEN_SALT_LENGTH} characters when read_only is disabled"
         )
 
+    max_l5x_bytes = _parse_positive_int(
+        os.environ.get(ENV_MAX_L5X_BYTES), DEFAULT_MAX_L5X_BYTES, ENV_MAX_L5X_BYTES
+    )
+    # Export cap defaults to the import cap when its own override is unset, so a single
+    # MCP_S5K_MAX_L5X_BYTES bump lifts both read and write ceilings together.
+    max_export_bytes = _parse_positive_int(
+        os.environ.get(ENV_MAX_EXPORT_BYTES), max_l5x_bytes, ENV_MAX_EXPORT_BYTES
+    )
+
     return Config(
         project_root=project_root,
         backup_dir=backup_dir,
@@ -102,4 +127,6 @@ def load_config() -> Config:
         allowed_property_names=_parse_allowlist(os.environ.get(ENV_ALLOWED_PROPS)),
         safety_tag_exclusions=_parse_allowlist(os.environ.get(ENV_SAFETY_EXCLUSIONS)),
         change_token_salt=change_token_salt,
+        max_l5x_bytes=max_l5x_bytes,
+        max_export_bytes=max_export_bytes,
     )
