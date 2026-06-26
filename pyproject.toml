@@ -13,6 +13,9 @@ dependencies = [
     "psutil>=5.9",
 ]
 
+[project.scripts]
+mcp-studio5k = "mcp_studio5k.__main__:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
