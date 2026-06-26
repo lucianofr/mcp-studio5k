@@ -28,3 +28,15 @@ async def test_read_only_hides_write_tools():
     assert "export_l5x" in names
     for write_tool in ("import_l5x", "preview_import", "validate_l5x", "save_project", "save_project_as"):
         assert write_tool not in names
+
+
+@pytest.mark.asyncio
+async def test_writable_exposes_write_tools():
+    mcp = build_server(_config(read_only=False), _session())
+    async with Client(mcp) as client:
+        tools = await client.list_tools()
+        names = {t.name for t in tools}
+    for write_tool in ("import_l5x", "preview_import", "validate_l5x", "save_project", "save_project_as"):
+        assert write_tool in names
+    import_tool = next(t for t in tools if t.name == "import_l5x")
+    assert import_tool.annotations.destructiveHint is True
