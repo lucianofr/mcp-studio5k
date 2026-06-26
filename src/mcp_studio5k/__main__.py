@@ -74,8 +74,15 @@ async def _amain() -> None:
         if sdk_cls is _MissingSdkProject:
             log.warning("MCP_S5K_PROJECT_FILE set but SDK missing; not opening a project")
         else:
-            await session.open(Path(project_file))
-            log.info("opened project %s", project_file)
+            # A failed open must NOT kill the server: log and keep serving so the
+            # client still connects and tools report "no project open" until the
+            # underlying issue (e.g. COM registration, licensing) is resolved.
+            try:
+                await session.open(Path(project_file))
+                log.info("opened project %s", project_file)
+            except Exception as exc:
+                log.warning("failed to open %s: %s; serving without an open project",
+                            project_file, exc)
 
     mcp = build_server(config, session)
     log.info("mcp-studio5k starting (read_only=%s)", config.read_only)
