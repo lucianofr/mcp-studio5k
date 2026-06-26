@@ -17,7 +17,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
-import time
 
 from .envelope import err_envelope, ok_envelope
 from .inspect import strip_comments
@@ -196,7 +195,8 @@ async def import_l5x(
 
     Guard order (each failing guard returns err_envelope with NO write):
       1. confirmed must be True (human gate)
-      2. change_token must match recomputed token (constant-time via hmac.compare_digest)
+      2. change_token must equal expected_change_token, and that token must itself
+         bind to this exact content+xpath+salt (all constant-time comparisons)
       3. collision_option must be in _ALLOWED_COLLISION
       4. l5x_content byte size must be <= max_bytes
       5. safety exclusions must not be touched
@@ -207,9 +207,19 @@ async def import_l5x(
     if confirmed is not True:
         return err_envelope("import refused: confirmed=True is required (human gate)")
 
-    # Guard 2: change_token must match recomputed token (constant-time compare)
+    # Guard 2: the caller-presented change_token must match the expected token that
+    # preview_import minted, AND that expected token must bind to this exact
+    # content+xpath+salt.  The salt is a server-held secret; an empty/blank salt
+    # would let an attacker who knows content+xpath forge a token, so reject it.
+    if not salt or not salt.strip():
+        return err_envelope("import refused: server salt is not configured")
     recomputed = make_change_token(l5x_content, x_path, salt=salt)
-    if not change_token or not hmac.compare_digest(change_token, recomputed):
+    if (
+        not change_token
+        or not expected_change_token
+        or not hmac.compare_digest(change_token, expected_change_token)
+        or not hmac.compare_digest(expected_change_token, recomputed)
+    ):
         return err_envelope(
             "import refused: change_token missing or does not match a recent preview_import"
         )
@@ -237,7 +247,7 @@ async def import_l5x(
 
     # Guard 6: rate limit
     try:
-        rate_limiter.check(now=now if now is not None else time.monotonic())
+        rate_limiter.check(now=now)
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
