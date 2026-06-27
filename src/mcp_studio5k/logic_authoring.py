@@ -174,6 +174,8 @@ async def preview_import(
 # import_l5x — human-confirmation gate (Task 21)
 # ---------------------------------------------------------------------------
 
+# import_l5x (routine/logic import) must NOT silently overwrite existing logic:
+# OVERWRITE_ON_COLL is intentionally excluded here and gated to import_tag_l5x.
 _ALLOWED_COLLISION = frozenset({"CANCEL_ON_COLL", "DISCARD_ON_COLL"})
 
 
@@ -261,6 +263,84 @@ async def import_l5x(
         return err_envelope(f"import refused: {exc}")
 
     # All guards passed — apply exactly once
+    await session.apply_l5x_import(l5x_content, x_path, collision_option)
+    return ok_envelope(
+        {"applied": True, "x_path": x_path, "collision_option": collision_option}
+    )
+
+
+# ---------------------------------------------------------------------------
+# import_tag_l5x — tag-creation gate (no preview: a not-yet-existing tag cannot
+# be exported, so the content-bound change_token flow does not apply here).
+# ---------------------------------------------------------------------------
+
+# Creating/overwriting a tag is this tool's purpose, so OVERWRITE_ON_COLL is
+# allowed here (unlike import_l5x). Kept separate to avoid widening the
+# routine-import gate.
+_ALLOWED_TAG_COLLISION = _ALLOWED_COLLISION | {"OVERWRITE_ON_COLL"}
+
+
+async def import_tag_l5x(
+    session,
+    l5x_content: str,
+    x_path: str,
+    *,
+    collision_option: str = "OVERWRITE_ON_COLL",
+    confirmed: bool = False,
+    exclusions,
+    rate_limiter,
+    max_bytes: int,
+    now: "float | None" = None,
+) -> dict:
+    """Create/overwrite a single controller- or program-scoped Tag via partial import.
+
+    The routine-oriented preview_import gate cannot be used to create a tag: a tag
+    that does not yet exist cannot be exported, so there is no "current" content to
+    diff and no change_token to mint.  This path therefore relies on the same
+    backup→import→reopen→rollback safety in ``session.apply_l5x_import`` plus a
+    reduced guard set:
+
+      1. confirmed must be True (human gate)
+      2. payload must declare TargetType="Tag" (refuse arbitrary L5X here)
+      3. collision_option must be in _ALLOWED_COLLISION
+      4. byte size must be <= max_bytes
+      5. safety exclusions must not be touched
+      6. rate limiter must allow the call
+      7. apply (session.apply_l5x_import awaited exactly once)
+    """
+    if confirmed is not True:
+        return err_envelope("import refused: confirmed=True is required (human gate)")
+
+    if 'TargetType="Tag"' not in l5x_content:
+        return err_envelope(
+            "import_tag_l5x refused: payload TargetType must be Tag"
+        )
+
+    if collision_option not in _ALLOWED_TAG_COLLISION:
+        return err_envelope(
+            f"import refused: collision_option must be one of {sorted(_ALLOWED_TAG_COLLISION)}"
+        )
+
+    if len(l5x_content.encode("utf-8")) > max_bytes:
+        return err_envelope(
+            f"import refused: l5x_content size exceeds max_bytes ({max_bytes})"
+        )
+
+    try:
+        hits = check_safety_exclusions(l5x_content, exclusions, max_bytes=max_bytes)
+    except SafetyError as exc:
+        return err_envelope(f"import refused: {exc}")
+    if hits:
+        return err_envelope(
+            "import refused: content touches safety-excluded tags: "
+            + ", ".join(sorted(hits))
+        )
+
+    try:
+        rate_limiter.check(now=now if now is not None else time.monotonic())
+    except RateLimitError as exc:
+        return err_envelope(f"import refused: {exc}")
+
     await session.apply_l5x_import(l5x_content, x_path, collision_option)
     return ok_envelope(
         {"applied": True, "x_path": x_path, "collision_option": collision_option}

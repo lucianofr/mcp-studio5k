@@ -116,8 +116,12 @@ class ProjectSession:
 
     async def _reopen(self) -> None:
         """Close and reopen the current project to validate the written state."""
+        import inspect
+
         path = self._path
-        await self._project.close()
+        _closed = self._project.close()
+        if inspect.isawaitable(_closed):
+            await _closed
         self._project = await self._sdk_cls.open_logix_project(str(path))
 
     def _invalidate(self) -> None:
@@ -176,9 +180,15 @@ class ProjectSession:
                 os.close(fd)
                 Path(tmp_l5x).write_text(l5x_content, encoding="utf-8")
                 try:
-                    await self._project.partial_import_from_xml_file(
-                        x_path, tmp_l5x, collision_option
+                    import inspect
+
+                    from logix_designer_sdk.enums import ImportCollisionOptions
+
+                    _imp = self._project.partial_import_from_xml_file(
+                        x_path, tmp_l5x, ImportCollisionOptions[collision_option]
                     )
+                    if inspect.isawaitable(_imp):
+                        await _imp
                     await self._reopen()
                 except Exception as exc:
                     try:
@@ -297,7 +307,11 @@ class ProjectSession:
                 raise SessionError(f"cannot create backup before write: {exc}") from exc
 
             try:
-                await self._project.save_as(str(resolved), force=overwrite)
+                import inspect
+
+                _sa = self._project.save_as(str(resolved), force=overwrite)
+                if inspect.isawaitable(_sa):
+                    await _sa
             except Exception as exc:
                 try:
                     restore_backup(backup, acd_path)
