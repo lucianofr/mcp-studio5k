@@ -43,6 +43,54 @@ async def test_writable_exposes_write_tools():
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_tools_available_read_only():
+    # open/close are lifecycle, not data writes: present even read-only.
+    mcp = build_server(_config(read_only=True), _session())
+    async with Client(mcp) as client:
+        tools = await client.list_tools()
+        names = {t.name for t in tools}
+    assert "open_project" in names
+    assert "close_project" in names
+    close_tool = next(t for t in tools if t.name == "close_project")
+    assert close_tool.annotations.destructiveHint is True
+
+
+@pytest.mark.asyncio
+async def test_open_project_tool():
+    sess = _session()
+    mcp = build_server(_config(read_only=True), sess)
+    async with Client(mcp) as client:
+        result = await client.call_tool("open_project", {"path": "Proj.ACD"})
+    text = result.content[0].text if hasattr(result, "content") else str(result)
+    assert "opened" in text or "Proj.ACD" in text
+    sess.open.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_open_project_refusal_is_envelope():
+    from mcp_studio5k.project_session import SessionError
+
+    sess = _session()
+    sess.open.side_effect = SessionError("a project is already open; close it first")
+    mcp = build_server(_config(read_only=True), sess)
+    async with Client(mcp) as client:
+        result = await client.call_tool("open_project", {"path": "Proj.ACD"})
+    text = result.content[0].text if hasattr(result, "content") else str(result)
+    assert "already open" in text
+
+
+@pytest.mark.asyncio
+async def test_close_project_tool():
+    sess = _session()
+    mcp = build_server(_config(read_only=True), sess)
+    async with Client(mcp) as client:
+        result = await client.call_tool("close_project", {})
+    text = result.content[0].text if hasattr(result, "content") else str(result)
+    assert "closed" in text
+    sess.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_template_resource_returns_template(monkeypatch):
     import mcp_studio5k.server as server_mod
 

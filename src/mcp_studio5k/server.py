@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from fastmcp import FastMCP
 
@@ -53,6 +54,31 @@ def build_server(config, session) -> FastMCP:
     async def export_l5x(x_path: str) -> dict:
         return await inspect_mod.export_l5x(session, x_path, max_bytes=config.max_export_bytes)
 
+    @mcp.tool(annotations={})
+    async def open_project(path: str) -> dict:
+        # Lifecycle, not a data write: available even read-only so a client can
+        # open a project to inspect it. session.open refuses if one is already
+        # open — surface that as a refusal envelope, never a raw exception.
+        try:
+            await session.open(Path(path))
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        except Exception as exc:  # SDK/COM/licensing failures
+            return err_envelope(f"open failed: {exc}")
+        return ok_envelope({"opened": path})
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def close_project() -> dict:
+        # Closing discards unsaved edits (no implicit save), hence _DESTRUCTIVE.
+        # No-op when nothing is open.
+        try:
+            await session.close()
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        except Exception as exc:
+            return err_envelope(f"close failed: {exc}")
+        return ok_envelope({"closed": True})
+
     if config.read_only is False:
         _register_write_tools(mcp, config, session, rate_limiter)
 
@@ -89,6 +115,20 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
             exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
             rate_limiter=rate_limiter,
             max_bytes=config.max_export_bytes, salt=config.change_token_salt,
+            now=time.monotonic(),
+        )
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def import_tag_l5x(
+        l5x_content: str, x_path: str,
+        collision_option: str = "OVERWRITE_ON_COLL", confirmed: bool = False,
+    ) -> dict:
+        return await la.import_tag_l5x(
+            session, l5x_content, x_path,
+            collision_option=collision_option, confirmed=confirmed,
+            exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
+            rate_limiter=rate_limiter,
+            max_bytes=config.max_export_bytes,
             now=time.monotonic(),
         )
 
