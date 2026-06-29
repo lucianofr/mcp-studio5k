@@ -20,13 +20,12 @@ _Debt that prevents or significantly slows new development._
 
 _Debt that causes recurring problems or bugs._
 
-<!-- Example:
-- [ ] **TD-002**: N+1 queries in user dashboard
-  - **Impact:** Medium - page load > 5s
-  - **Effort:** 3 days
+- [ ] **TD-001**: Rockwell SDK engine (`RSLogix5000Services.exe`) faults under load (`LgxSrv_E_SERVER_FAULTED`), unrecoverable without killing the engine PID (`Restart-Service LdSdkService` alone does NOT clear it). Root cause of WHY it faults under back-to-back export/import churn is unknown. Lock coverage on SDK calls was audited and is complete — not a missing-lock bug. Fixes C1/C2/D/D2 stop the session from being left unusable after a fault, but the underlying engine fault remains.
+  - **Impact:** High - intermittent server faults requiring manual engine restart
+  - **Source:** bugs-session-stability-20260629.md, handoff-mcp-studio5k-stability-fixes.md §3-A
+  - **Effort:** Unknown (needs SDK-level investigation + a health-check wrapper that detects faulted engine and returns a clear "needs engine restart" envelope, ideally an admin tool to kill+restart the engine in-process)
   - **Owner:** @unassigned
-  - **Created:** 2025-01-01
--->
+  - **Created:** 2026-06-29
 
 ## Medium (Slows Development)
 

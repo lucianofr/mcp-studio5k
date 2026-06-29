@@ -1,15 +1,15 @@
 # Report Registry
 
-**Last Updated:** YYYY-MM-DD
+**Last Updated:** 2026-06-29
 
 > Central index of agent work. Check here before starting new work.
 
 ---
 
-## YYYY-MM-DD
+## 2026-06-29
 
 <!-- Format: - report-name | Status | One-line summary -->
-<!-- Example: - review-auth-timeout-20251228 | Completed | Root cause and fix plan -->
+- bugs-session-stability-20260629 | Completed | Fixed C1 NO_CHANGES-is-success, C2 import-failure self-heal, D _invalidate closes orphan, D2 open() desync wrap, A status() snapshot; E auto-open opt-in via MCP_S5K_AUTO_OPEN (default off). python-reviewer BLOCK (try-block conflated import+reopen) → split into two try blocks, scoped NO_CHANGES check + error messages. 255 tests pass. TD-001 logged (engine-fault root cause, not code-fixable).
 
 ---
 
