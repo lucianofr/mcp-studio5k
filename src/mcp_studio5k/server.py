@@ -148,6 +148,24 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
         )
 
     @mcp.tool(annotations=_DESTRUCTIVE)
+    async def import_routine_l5x(
+        path: str,
+        x_path: str,
+        collision_option: str = "OVERWRITE_ON_COLL",
+        confirmed: bool = False,
+    ) -> dict:
+        # File-based routine import/replace: server reads the on-disk .L5X bytes,
+        # so large routines need no inline retransmission. x_path is the target.
+        return await la.import_routine_l5x(
+            session, path, x_path,
+            collision_option=collision_option, confirmed=confirmed,
+            exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
+            rate_limiter=rate_limiter,
+            max_bytes=config.max_export_bytes,
+            now=time.monotonic(),
+        )
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
     async def save_project() -> dict:
         # Persisting to disk is a write: subject it to the same cooldown as imports
         # and surface session failures as refusal envelopes, never raw exceptions.

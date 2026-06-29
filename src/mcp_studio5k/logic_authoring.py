@@ -351,9 +351,111 @@ async def import_tag_l5x(
 # Controller-scoped component definitions (AOI/UDT) import under the Controller node.
 _COMPONENT_IMPORT_XPATH = "Controller"
 _COMPONENT_TARGET_TYPES = ("AddOnInstructionDefinition", "DataType")
+_ROUTINE_TARGET_TYPES = ("Routine",)
 # Reject UNC/device paths the same way ProjectSession.resolve_under_root does, so an
 # import source cannot reach \\host\share or \\?\ device namespaces.
 _UNC_PREFIXES = ("\\\\", "//", "\\\\?\\", "\\\\.\\")
+
+
+def _read_l5x_file_guarded(path: str, *, max_bytes: int, allowed_target_types):
+    """Shared file-source guards for the file-based imports.
+
+    Returns ``(l5x_content, byte_len, None)`` on success, or
+    ``(None, None, message)`` where ``message`` is a bare reason (callers prefix
+    "import refused: "). Guards: non-UNC/device, ``.L5X`` suffix, file exists,
+    size <= max_bytes, valid UTF-8 (BOM tolerated), declared TargetType in the
+    allowlist. Reading server-side keeps the bytes faithful — no LLM transcription.
+    """
+    raw = str(path)
+    if any(raw.startswith(p) for p in _UNC_PREFIXES):
+        return None, None, f"UNC/device paths are not allowed: {raw}"
+
+    file_path = Path(path)
+    if file_path.suffix.lower() != ".l5x":
+        return None, None, f"path must end in .L5X: {file_path}"
+    if not file_path.is_file():
+        return None, None, f"file not found: {file_path}"
+
+    try:
+        data = file_path.read_bytes()
+    except OSError as exc:
+        return None, None, f"cannot read file: {exc}"
+
+    if len(data) > max_bytes:
+        return None, None, f"file size {len(data)} exceeds max_bytes ({max_bytes})"
+
+    # utf-8-sig tolerates an optional BOM that RSLogix exports sometimes carry.
+    try:
+        content = data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        return None, None, f"file is not valid UTF-8: {exc}"
+
+    if not any(f'TargetType="{t}"' in content for t in allowed_target_types):
+        return None, None, (
+            "payload TargetType must be one of " + ", ".join(allowed_target_types)
+        )
+
+    return content, len(data), None
+
+
+async def _apply_file_import(
+    session,
+    path,
+    x_path,
+    *,
+    collision_option,
+    confirmed,
+    exclusions,
+    rate_limiter,
+    max_bytes,
+    allowed_target_types,
+    now,
+):
+    """Confirmed-gated file-based import shared by the component and routine tools."""
+    if confirmed is not True:
+        return err_envelope("import refused: confirmed=True is required (human gate)")
+
+    content, byte_len, file_err = _read_l5x_file_guarded(
+        path, max_bytes=max_bytes, allowed_target_types=allowed_target_types
+    )
+    if file_err is not None:
+        return err_envelope(f"import refused: {file_err}")
+
+    if collision_option not in _ALLOWED_TAG_COLLISION:
+        return err_envelope(
+            f"import refused: collision_option must be one of "
+            f"{sorted(_ALLOWED_TAG_COLLISION)}"
+        )
+
+    try:
+        hits = check_safety_exclusions(content, exclusions, max_bytes=max_bytes)
+    except SafetyError as exc:
+        return err_envelope(f"import refused: {exc}")
+    if hits:
+        return err_envelope(
+            "import refused: content touches safety-excluded tags: "
+            + ", ".join(sorted(hits))
+        )
+
+    try:
+        rate_limiter.check(now=now if now is not None else time.monotonic())
+    except RateLimitError as exc:
+        return err_envelope(f"import refused: {exc}")
+
+    try:
+        await session.apply_l5x_import(content, x_path, collision_option)
+    except Exception as exc:  # SessionError/rollback or SDK failure → clean envelope
+        return err_envelope(str(exc))
+
+    return ok_envelope(
+        {
+            "applied": True,
+            "x_path": x_path,
+            "collision_option": collision_option,
+            "source": str(Path(path)),
+            "bytes": byte_len,
+        }
+    )
 
 
 async def import_component_l5x(
@@ -369,96 +471,59 @@ async def import_component_l5x(
 ) -> dict:
     """Import a controller-scoped component definition (AOI/UDT) from an on-disk .L5X.
 
-    Neither existing import path fits an AOI/UDT definition:
-
-      * ``import_l5x`` is routine-only — its change_token is derived from a routine
-        diff, so a definition (no ``<Routine>`` to diff) cannot mint one, and the
-        full payload is far too large to retransmit inline byte-for-byte twice.
-      * ``import_tag_l5x`` refuses any TargetType other than ``Tag``.
-
-    This path reads the file **server-side** (faithful bytes, no LLM transcription)
-    and gates on a reduced guard set, then reuses ``session.apply_l5x_import``'s
-    backup→import→reopen→rollback safety:
-
-      1. confirmed must be True (human gate)
-      2. path must be a local (non-UNC/device) existing ``.L5X`` file
-      3. byte size must be <= max_bytes
-      4. payload must declare a component TargetType (AOI/UDT), never a routine/tag
-      5. collision_option must be in _ALLOWED_TAG_COLLISION
-      6. safety exclusions must not be touched
-      7. rate limiter must allow the call
-      8. apply under the Controller node
+    Neither existing import path fits an AOI/UDT definition: ``import_l5x`` is
+    routine-only (its change_token is derived from a routine diff, and the payload
+    is too large to retransmit inline byte-for-byte twice) and ``import_tag_l5x``
+    refuses any TargetType other than ``Tag``. This reads the file server-side and
+    applies under the Controller node, gated on confirmed + the shared file guards.
     """
-    if confirmed is not True:
-        return err_envelope("import refused: confirmed=True is required (human gate)")
+    return await _apply_file_import(
+        session,
+        path,
+        _COMPONENT_IMPORT_XPATH,
+        collision_option=collision_option,
+        confirmed=confirmed,
+        exclusions=exclusions,
+        rate_limiter=rate_limiter,
+        max_bytes=max_bytes,
+        allowed_target_types=_COMPONENT_TARGET_TYPES,
+        now=now,
+    )
 
-    raw = str(path)
-    if any(raw.startswith(p) for p in _UNC_PREFIXES):
-        return err_envelope(f"import refused: UNC/device paths are not allowed: {raw}")
 
-    file_path = Path(path)
-    if file_path.suffix.lower() != ".l5x":
-        return err_envelope(f"import refused: path must end in .L5X: {file_path}")
-    if not file_path.is_file():
-        return err_envelope(f"import refused: file not found: {file_path}")
+async def import_routine_l5x(
+    session,
+    path: str,
+    x_path: str,
+    *,
+    collision_option: str = "OVERWRITE_ON_COLL",
+    confirmed: bool = False,
+    exclusions,
+    rate_limiter,
+    max_bytes: int,
+    now: "float | None" = None,
+) -> dict:
+    """Import/replace a Routine from an on-disk .L5X at ``x_path`` (server reads bytes).
 
-    try:
-        data = file_path.read_bytes()
-    except OSError as exc:
-        return err_envelope(f"import refused: cannot read file: {exc}")
-
-    if len(data) > max_bytes:
-        return err_envelope(
-            f"import refused: file size {len(data)} exceeds max_bytes ({max_bytes})"
-        )
-
-    # utf-8-sig tolerates an optional BOM that RSLogix exports sometimes carry.
-    try:
-        l5x_content = data.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        return err_envelope(f"import refused: file is not valid UTF-8: {exc}")
-
-    if not any(f'TargetType="{t}"' in l5x_content for t in _COMPONENT_TARGET_TYPES):
-        return err_envelope(
-            "import_component_l5x refused: payload TargetType must be one of "
-            + ", ".join(_COMPONENT_TARGET_TYPES)
-            + " (use import_l5x for routines, import_tag_l5x for tags)"
-        )
-
-    if collision_option not in _ALLOWED_TAG_COLLISION:
-        return err_envelope(
-            f"import refused: collision_option must be one of "
-            f"{sorted(_ALLOWED_TAG_COLLISION)}"
-        )
-
-    try:
-        hits = check_safety_exclusions(l5x_content, exclusions, max_bytes=max_bytes)
-    except SafetyError as exc:
-        return err_envelope(f"import refused: {exc}")
-    if hits:
-        return err_envelope(
-            "import refused: content touches safety-excluded tags: "
-            + ", ".join(sorted(hits))
-        )
-
-    try:
-        rate_limiter.check(now=now if now is not None else time.monotonic())
-    except RateLimitError as exc:
-        return err_envelope(f"import refused: {exc}")
-
-    try:
-        await session.apply_l5x_import(
-            l5x_content, _COMPONENT_IMPORT_XPATH, collision_option
-        )
-    except Exception as exc:  # SessionError/rollback or SDK failure → clean envelope
-        return err_envelope(str(exc))
-
-    return ok_envelope(
-        {
-            "applied": True,
-            "x_path": _COMPONENT_IMPORT_XPATH,
-            "collision_option": collision_option,
-            "source": str(file_path),
-            "bytes": len(data),
-        }
+    ``import_l5x`` requires the full routine inline AND a change_token bound to a
+    byte-identical retransmission of it — infeasible for large routines (e.g. a
+    ~900 KB C_CONTROLE). The file-based authoring flow is: export the routine to
+    disk, edit the rung(s) in the file, then call this with the edited file. The
+    caller supplies the target routine ``x_path``; with OVERWRITE_ON_COLL the SDK
+    replaces the existing routine. Safety still goes through
+    ``session.apply_l5x_import`` (backup → import → reopen → rollback).
+    """
+    if not x_path or not str(x_path).strip():
+        return err_envelope("import refused: x_path (target routine) is required")
+    return await _apply_file_import(
+        session,
+        path,
+        x_path,
+        collision_option=collision_option,
+        confirmed=confirmed,
+        exclusions=exclusions,
+        rate_limiter=rate_limiter,
+        max_bytes=max_bytes,
+        allowed_target_types=_ROUTINE_TARGET_TYPES,
+        now=now,
     )

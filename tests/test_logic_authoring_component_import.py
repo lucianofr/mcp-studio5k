@@ -125,3 +125,59 @@ def test_refuse_bad_collision(tmp_path):
     assert resp["ok"] is False
     assert "collision_option" in resp["error"]
     assert session.imports == []
+
+
+# --- import_routine_l5x ---------------------------------------------------
+
+RTN_XPATH = "Controller/Programs/Program[@Name='Patio_Autonomo']/Routines/Routine[@Name='C_CONTROLE']"
+
+
+def _run_routine(path, x_path=RTN_XPATH, **kw):
+    defaults = dict(
+        confirmed=True,
+        exclusions=frozenset(),
+        rate_limiter=FakeRateLimiter(),
+        max_bytes=20_000_000,
+        now=10.0,
+    )
+    defaults.update(kw)
+    session = defaults.pop("session", FakeSession())
+    resp = asyncio.run(
+        la.import_routine_l5x(session, str(path), x_path, **defaults)
+    )
+    return resp, session
+
+
+def test_import_routine_applies_at_xpath(tmp_path):
+    p = _write(tmp_path, "C_CONTROLE.L5X", ROUTINE_L5X)
+    session = FakeSession()
+    resp, _ = _run_routine(p, session=session)
+    assert resp["ok"] is True
+    assert resp["data"]["x_path"] == RTN_XPATH
+    assert session.imports and session.imports[0][1] == RTN_XPATH
+    # routine import defaults to overwrite so it can replace the existing routine
+    assert session.imports[0][2] == "OVERWRITE_ON_COLL"
+
+
+def test_routine_refuses_empty_xpath(tmp_path):
+    p = _write(tmp_path, "C_CONTROLE.L5X", ROUTINE_L5X)
+    resp, session = _run_routine(p, x_path="  ")
+    assert resp["ok"] is False
+    assert "x_path" in resp["error"]
+    assert session.imports == []
+
+
+def test_routine_refuses_non_routine_targettype(tmp_path):
+    p = _write(tmp_path, "aoi.L5X", AOI_L5X)
+    resp, session = _run_routine(p)
+    assert resp["ok"] is False
+    assert "TargetType" in resp["error"]
+    assert session.imports == []
+
+
+def test_routine_refuses_without_confirmed(tmp_path):
+    p = _write(tmp_path, "C_CONTROLE.L5X", ROUTINE_L5X)
+    resp, session = _run_routine(p, confirmed=False)
+    assert resp["ok"] is False
+    assert "confirmed" in resp["error"]
+    assert session.imports == []
