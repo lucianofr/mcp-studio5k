@@ -12,12 +12,19 @@ from .l5x.templates import get_l5x_template
 from .l5x.validate import validate_l5x as _validate_l5x
 from .project_session import SessionError
 from .safety import RateLimitError, WriteRateLimiter
+from .sdk_runtime import DEFAULT_SDK_PORT, engine_health
 
 _READ_ONLY = {"readOnlyHint": True, "idempotentHint": True}
 _DESTRUCTIVE = {"destructiveHint": True}
 
 
-def build_server(config, session) -> FastMCP:
+def build_server(
+    config,
+    session,
+    *,
+    engine_restart=None,
+    engine_port: int = DEFAULT_SDK_PORT,
+) -> FastMCP:
     mcp = FastMCP("mcp-studio5k")
     rate_limiter = WriteRateLimiter(
         limit=getattr(config, "write_limit_per_session", 5),
@@ -78,6 +85,39 @@ def build_server(config, session) -> FastMCP:
         except Exception as exc:
             return err_envelope(f"close failed: {exc}")
         return ok_envelope({"closed": True})
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def health() -> dict:
+        """Report session and engine health (always available, even read-only)."""
+        try:
+            return ok_envelope(
+                {
+                    "session": session.status(),
+                    "engine": await engine_health(engine_port),
+                }
+            )
+        except Exception as exc:
+            return err_envelope(f"health check failed: {exc}")
+
+    # Registered regardless of read_only BY DESIGN: restart_engine is an out-of-band
+    # engine-recovery lever for operators — it does not modify the project, only
+    # restarts the faulted SDK engine process (LdSdkServer.exe). Hiding it in
+    # read-only mode would leave no recovery path when the engine faults mid-read.
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def restart_engine() -> dict:
+        """Terminate and respawn the Rockwell SDK engine process (operator lever).
+
+        Always registered, even in read-only mode, so operators can recover from an
+        engine fault without restarting the MCP server.  Returns err_envelope when
+        no restart hook was injected at server build time.
+        """
+        if engine_restart is None:
+            return err_envelope("engine restart not available")
+        try:
+            pid = await engine_restart()
+            return ok_envelope({"restarted_pid": pid})
+        except Exception as exc:
+            return err_envelope(f"engine restart failed: {exc}")
 
     if config.read_only is False:
         _register_write_tools(mcp, config, session, rate_limiter)

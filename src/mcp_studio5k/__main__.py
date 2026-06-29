@@ -25,6 +25,7 @@ from pathlib import Path
 
 from .config import load_config
 from .project_session import ProjectSession
+from .sdk_runtime import DEFAULT_SDK_PORT, restart_server
 from .server import build_server
 
 log = logging.getLogger("mcp_studio5k")
@@ -65,7 +66,25 @@ def _load_sdk_project_cls():
 async def _amain() -> None:
     config = load_config()
     sdk_cls = _load_sdk_project_cls()
-    session = ProjectSession(config, sdk_project_cls=sdk_cls)
+
+    # Build an engine-restart closure when the real SDK is present so both
+    # ProjectSession (read-op auto-recovery) and the restart_engine tool can use it.
+    # When the SDK is absent, pass None so callers get a clear "not available" error.
+    engine_restart = None
+    port = DEFAULT_SDK_PORT
+    if sdk_cls is not _MissingSdkProject:
+        try:
+            from .sdk_discovery import discover_sdk
+            sdk_info = discover_sdk()
+
+            async def _restart():
+                return await restart_server(sdk_info, port=port)
+
+            engine_restart = _restart
+        except Exception as exc:
+            log.warning("could not build engine_restart closure: %s", exc)
+
+    session = ProjectSession(config, sdk_project_cls=sdk_cls, engine_restart=engine_restart)
 
     # Auto-open is OPT-IN and OFF by default: eager startup open caused a
     # close+reopen dance on every reconnect (engine fault recovery would respawn
@@ -92,7 +111,7 @@ async def _amain() -> None:
                 log.warning("failed to open %s: %s; serving without an open project",
                             project_file, exc)
 
-    mcp = build_server(config, session)
+    mcp = build_server(config, session, engine_restart=engine_restart, engine_port=port)
     log.info("mcp-studio5k starting (read_only=%s)", config.read_only)
     await mcp.run_async()
 

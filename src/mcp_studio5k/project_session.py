@@ -11,6 +11,7 @@ from typing import Any
 log = logging.getLogger("mcp_studio5k")
 
 from mcp_studio5k.backup import BackupError, make_verified_backup, restore_backup
+from mcp_studio5k.engine import is_engine_fault
 from mcp_studio5k.safety import SafetyError, check_safety_exclusions
 
 UNC_PREFIXES = ("\\\\", "//")
@@ -52,9 +53,16 @@ def resolve_under_root(path: "Path | str", root: Path) -> Path:
 class ProjectSession:
     """One active LogixProject per session; all SDK ops under one lock."""
 
-    def __init__(self, config, *, sdk_project_cls) -> None:
+    def __init__(
+        self,
+        config,
+        *,
+        sdk_project_cls,
+        engine_restart: "Callable[[], Awaitable[int]] | None" = None,
+    ) -> None:
         self._config = config
         self._sdk_cls = sdk_project_cls
+        self._engine_restart = engine_restart
         self._lock = asyncio.Lock()
         self._project = None
         self._path: Path | None = None
@@ -178,6 +186,37 @@ class ProjectSession:
         self._project = None
         self._path = None
 
+    async def _recover_and_reopen(self) -> None:
+        """Restart the engine, then reopen the project. Must be called already-locked.
+
+        The dead COM handle is NOT closed before reopen — after an engine restart the
+        handle is invalid and calling close() on it could itself fault.
+        """
+        log.warning("engine fault: invoking engine_restart hook")
+        await self._engine_restart()  # type: ignore[misc]
+        self._project = None  # dead post-restart handle; never close it (close could re-fault)
+        if self._path is not None:
+            self._project = await self._sdk_cls.open_logix_project(str(self._path))
+
+    async def _with_fault_recovery(self, do):
+        """Run *do()*, auto-recovering once on an engine fault (if hook is set).
+
+        Must be called already inside ``self._lock``; does NOT re-acquire the lock.
+        A second consecutive fault after recovery is propagated without another retry.
+        """
+        try:
+            return await do()
+        except Exception as exc:
+            if self._engine_restart is None or not is_engine_fault(exc):
+                raise
+            log.warning("engine fault detected, auto-recovering: %s", exc)
+            try:
+                await self._recover_and_reopen()
+            except Exception:
+                await self._invalidate()
+                raise
+            return await do()  # retry once; a second fault propagates
+
     # ------------------------------------------------------------------
     # Mutation operations: backup → operate → reopen → rollback on failure
     # ------------------------------------------------------------------
@@ -243,18 +282,37 @@ class ProjectSession:
                     if inspect.isawaitable(_imp):
                         await _imp
                 except Exception as exc:
-                    # C1: NO_CHANGES is a benign "nothing changed" outcome — treat as success.
+                    # C1: NO_CHANGES is checked FIRST (before engine-fault) — intentional order:
+                    # a benign no-op is mutually exclusive with a real engine fault (a faulted
+                    # server won't also emit the NO_CHANGES token), so checking it first keeps
+                    # the success path fast without masking real faults.
                     # No restore, no invalidate, no write_count bump; session stays open.
                     # NOTE: this check applies ONLY to the import call, not to _reopen().
                     if IMPORT_NO_CHANGES_TOKEN in str(exc):
                         return  # benign; outer finally removes tmp_l5x
 
-                    # C2: Real import failure — restore backup, then try to reopen so the
-                    # session remains usable. Only invalidate if the reopen also fails.
+                    # Restore backup regardless of fault type.
                     try:
                         restore_backup(backup, acd_path)
                     except Exception:
-                        pass  # cannot restore; continue to reopen attempt
+                        pass
+
+                    # Engine-fault path: restart engine + reopen; raise with re-issue hint.
+                    if is_engine_fault(exc) and self._engine_restart is not None:
+                        try:
+                            await self._recover_and_reopen()
+                        except Exception as restart_exc:
+                            await self._invalidate()
+                            raise SessionError(
+                                f"engine faulted and restart failed; session invalidated: {exc}"
+                            ) from exc
+                        raise SessionError(
+                            f"engine faulted and was restarted; project rolled back, "
+                            f"re-issue the operation: {exc}"
+                        ) from exc
+
+                    # C2: Real non-engine import failure — try to reopen so session remains
+                    # usable. Only invalidate if the reopen also fails.
                     try:
                         await self._reopen()
                     except Exception as reopen_exc:
@@ -270,7 +328,7 @@ class ProjectSession:
 
                 # Block 2: REOPEN-TO-VERIFY — import succeeded on disk; verify by reopening.
                 # A failure here means the file was written but the SDK can't reopen it;
-                # we roll back to the pre-import backup and invalidate the session.
+                # we roll back to the pre-import backup.
                 try:
                     await self._reopen()
                 except Exception as exc:
@@ -278,6 +336,19 @@ class ProjectSession:
                         restore_backup(backup, acd_path)
                     except Exception:
                         pass
+                    if is_engine_fault(exc) and self._engine_restart is not None:
+                        try:
+                            await self._recover_and_reopen()
+                        except Exception:
+                            await self._invalidate()
+                            raise SessionError(
+                                f"engine faulted during reopen and restart failed; "
+                                f"session invalidated: {exc}"
+                            ) from exc
+                        raise SessionError(
+                            f"engine faulted during reopen/verify; project rolled back, "
+                            f"re-issue the operation: {exc}"
+                        ) from exc
                     await self._invalidate()
                     raise SessionError(
                         f"import succeeded but reopen/verify failed and was rolled back: {exc}"
@@ -311,7 +382,20 @@ class ProjectSession:
                 try:
                     restore_backup(backup, acd_path)
                 except Exception:
-                    pass  # cannot restore; still invalidate so no corrupted session is handed out
+                    pass
+                if is_engine_fault(exc) and self._engine_restart is not None:
+                    try:
+                        await self._recover_and_reopen()
+                    except Exception:
+                        await self._invalidate()
+                        raise SessionError(
+                            f"engine faulted during save and restart failed; "
+                            f"session invalidated: {exc}"
+                        ) from exc
+                    raise SessionError(
+                        f"engine faulted and was restarted; project rolled back, "
+                        f"re-issue the operation: {exc}"
+                    ) from exc
                 await self._invalidate()
                 raise SessionError(
                     f"save failed and was rolled back: {exc}"
@@ -335,8 +419,12 @@ class ProjectSession:
         async with self._lock:
             if self._project is None:
                 raise SessionError("no project is open")
-            getter = getattr(self._project, f"get_tag_value_{normalized}")
-            return await getter(tag_xpath, mode=mode)
+
+            async def _do_get():
+                _getter = getattr(self._project, f"get_tag_value_{normalized}")
+                return await _getter(tag_xpath, mode=mode)
+
+            return await self._with_fault_recovery(_do_get)
 
     async def partial_export(self, x_path: str) -> str:
         """Export an L5X subtree to a controlled temp file and return its text.
@@ -353,8 +441,11 @@ class ProjectSession:
             )
             os.close(fd)
             try:
-                await self._project.partial_export_to_xml_file(x_path, tmp)
-                return Path(tmp).read_text(encoding="utf-8")
+                async def _do_export():
+                    await self._project.partial_export_to_xml_file(x_path, tmp)
+                    return Path(tmp).read_text(encoding="utf-8")
+
+                return await self._with_fault_recovery(_do_export)
             finally:
                 try:
                     os.remove(tmp)
@@ -399,7 +490,20 @@ class ProjectSession:
                 try:
                     restore_backup(backup, acd_path)
                 except Exception:
-                    pass  # cannot restore; still invalidate so no corrupted session is handed out
+                    pass
+                if is_engine_fault(exc) and self._engine_restart is not None:
+                    try:
+                        await self._recover_and_reopen()
+                    except Exception:
+                        await self._invalidate()
+                        raise SessionError(
+                            f"engine faulted during save_as and restart failed; "
+                            f"session invalidated: {exc}"
+                        ) from exc
+                    raise SessionError(
+                        f"engine faulted and was restarted; project rolled back, "
+                        f"re-issue the operation: {exc}"
+                    ) from exc
                 await self._invalidate()
                 raise SessionError(
                     f"save_as failed and was rolled back: {exc}"
