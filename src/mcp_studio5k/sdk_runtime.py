@@ -101,6 +101,14 @@ async def _terminate_pid(pid: int) -> None:
         proc.kill()
 
 
+async def engine_health(port: int = DEFAULT_SDK_PORT) -> dict:
+    """Return a lightweight health snapshot of the SDK engine process."""
+    return {
+        "listening_pid": _find_running_pid(port),
+        "loopback_bound": await check_loopback_bound(port),
+    }
+
+
 async def restart_server(info: SdkInfo, *, port: int = DEFAULT_SDK_PORT) -> int:
     """Terminate any existing server on port, then ensure a fresh one; return PID."""
     existing_pid = _find_running_pid(port)

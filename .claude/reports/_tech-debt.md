@@ -26,6 +26,7 @@ _Debt that causes recurring problems or bugs._
   - **Effort:** Unknown (needs SDK-level investigation + a health-check wrapper that detects faulted engine and returns a clear "needs engine restart" envelope, ideally an admin tool to kill+restart the engine in-process)
   - **Owner:** @unassigned
   - **Created:** 2026-06-29
+  - **Update 2026-06-29:** RECOVERY shipped (impl-engine-fault-recovery-20260629). `LgxSrv_E_SERVER_FAULTED` is now detected (engine.is_engine_fault); reads auto-restart the engine + reopen + retry once; writes restore backup + restart + reopen + raise "re-issue" SessionError (no blind write replay); `health` + `restart_engine` MCP tools added. Engine restart reuses sdk_runtime.restart_server (kill PID + respawn). STILL OPEN: WHY the engine faults under load (SDK-internal, likely unreproducible without the live fault) — recovery mitigates impact but does not prevent the fault. Residual test-debt: shared fakes imported from tests.conftest + class-level mutable attrs in _FaultCountProject (not xdist-safe).
 
 ## Medium (Slows Development)
 
