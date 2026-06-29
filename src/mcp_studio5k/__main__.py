@@ -67,10 +67,18 @@ async def _amain() -> None:
     sdk_cls = _load_sdk_project_cls()
     session = ProjectSession(config, sdk_project_cls=sdk_cls)
 
+    # Auto-open is OPT-IN and OFF by default: eager startup open caused a
+    # close+reopen dance on every reconnect (engine fault recovery would respawn
+    # the server, which then auto-opened the pristine file instead of the working
+    # copy). By default reconnect now lands with NO project; the client opens the
+    # copy explicitly (e.g. /abrir-projeto). Set MCP_S5K_AUTO_OPEN=1 to restore
+    # eager open of MCP_S5K_PROJECT_FILE.
+    #
     # Open a project in THIS event loop so ProjectSession's asyncio.Lock and every
     # subsequent tool call share one loop (mixing loops would raise at runtime).
+    auto_open = os.environ.get("MCP_S5K_AUTO_OPEN", "").strip().lower() in ("1", "true", "yes", "on")
     project_file = os.environ.get("MCP_S5K_PROJECT_FILE")
-    if project_file:
+    if auto_open and project_file:
         if sdk_cls is _MissingSdkProject:
             log.warning("MCP_S5K_PROJECT_FILE set but SDK missing; not opening a project")
         else:

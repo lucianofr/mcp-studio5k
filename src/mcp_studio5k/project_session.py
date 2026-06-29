@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("mcp_studio5k")
 
 from mcp_studio5k.backup import BackupError, make_verified_backup, restore_backup
 from mcp_studio5k.safety import SafetyError, check_safety_exclusions
@@ -14,6 +17,11 @@ UNC_PREFIXES = ("\\\\", "//")
 
 # Supported data types for get_tag_value dispatch.
 _TAG_VALUE_TYPES = frozenset({"bool", "dint", "int", "real", "string"})
+
+# Token that identifies a benign "nothing changed" import outcome from the SDK.
+# The SDK raises OperationNotPerformedError whose str() contains this substring.
+# We detect it via substring check (no SDK import needed → tests stay SDK-free).
+IMPORT_NO_CHANGES_TOKEN = "XMLSrv_E_IMPORT_ABORTED_NO_CHANGES"
 
 
 class SessionError(Exception):
@@ -53,10 +61,22 @@ class ProjectSession:
         self._write_count = 0
 
     def status(self) -> dict[str, Any]:
+        """Lock-free snapshot of session state.
+
+        Do not use the returned 'active' value as a precondition gate outside
+        the lock; mutations re-check via _require_active under the lock, so a
+        True here does not guarantee the session is still active when the caller
+        acts on it.
+        """
+        # Snapshot fields into locals so the dict can't observe a half-updated state
+        # even if another coroutine runs between reads (low-severity hardening).
+        project = self._project
+        path = self._path
+        write_count = self._write_count
         return {
-            "active": self._project is not None,
-            "path": str(self._path) if self._path else None,
-            "write_count": self._write_count,
+            "active": project is not None,
+            "path": str(path) if path else None,
+            "write_count": write_count,
         }
 
     async def open(self, path: Path) -> None:
@@ -66,7 +86,16 @@ class ProjectSession:
             # cycle-15.5 asserts call order ["enter","exit","enter","exit"], which
             # requires the SDK call to happen unconditionally under the lock.
             # Note: create() uses the safer guard-first order; do NOT change that.
-            project = await self._sdk_cls.open_logix_project(str(resolved))
+            try:
+                project = await self._sdk_cls.open_logix_project(str(resolved))
+            except Exception as exc:
+                if self._project is None:
+                    # Our session has no project — orphan is at SDK level.
+                    # Wrap so callers get an actionable SessionError, not a raw SDK error.
+                    raise SessionError(
+                        f"SDK failed to open project (engine may need restart): {exc}"
+                    ) from exc
+                raise
             if self._project is not None:
                 try:
                     import inspect
@@ -122,7 +151,11 @@ class ProjectSession:
                 )
 
     async def _reopen(self) -> None:
-        """Close and reopen the current project to validate the written state."""
+        """Close and reopen the current project to validate the written state.
+
+        If open_logix_project raises, self._project retains the old (already-closed)
+        handle; callers must call _invalidate() to recover a consistent state.
+        """
         import inspect
 
         path = self._path
@@ -131,8 +164,17 @@ class ProjectSession:
             await _closed
         self._project = await self._sdk_cls.open_logix_project(str(path))
 
-    def _invalidate(self) -> None:
-        """Clear session state after a rollback."""
+    async def _invalidate(self) -> None:
+        """Clear session state after a rollback, closing the orphaned project first."""
+        import inspect
+
+        if self._project is not None:
+            try:
+                _closed = self._project.close()
+                if inspect.isawaitable(_closed):
+                    await _closed
+            except Exception:
+                pass  # swallow close errors — we're already in an error path
         self._project = None
         self._path = None
 
@@ -186,6 +228,10 @@ class ProjectSession:
             try:
                 os.close(fd)
                 Path(tmp_l5x).write_text(l5x_content, encoding="utf-8")
+                # Block 1: IMPORT ONLY — reopen is intentionally separate (see Block 2).
+                # Keeping the two operations in separate try blocks ensures that a
+                # reopen failure is NEVER mislabeled as an import failure and that
+                # the benign NO_CHANGES token check cannot swallow a reopen error.
                 try:
                     import inspect
 
@@ -196,15 +242,45 @@ class ProjectSession:
                     )
                     if inspect.isawaitable(_imp):
                         await _imp
+                except Exception as exc:
+                    # C1: NO_CHANGES is a benign "nothing changed" outcome — treat as success.
+                    # No restore, no invalidate, no write_count bump; session stays open.
+                    # NOTE: this check applies ONLY to the import call, not to _reopen().
+                    if IMPORT_NO_CHANGES_TOKEN in str(exc):
+                        return  # benign; outer finally removes tmp_l5x
+
+                    # C2: Real import failure — restore backup, then try to reopen so the
+                    # session remains usable. Only invalidate if the reopen also fails.
+                    try:
+                        restore_backup(backup, acd_path)
+                    except Exception:
+                        pass  # cannot restore; continue to reopen attempt
+                    try:
+                        await self._reopen()
+                    except Exception as reopen_exc:
+                        log.warning(
+                            "reopen after import-failure rollback also failed: %s",
+                            reopen_exc,
+                            exc_info=True,
+                        )
+                        await self._invalidate()
+                    raise SessionError(
+                        f"import failed and was rolled back: {exc}"
+                    ) from exc
+
+                # Block 2: REOPEN-TO-VERIFY — import succeeded on disk; verify by reopening.
+                # A failure here means the file was written but the SDK can't reopen it;
+                # we roll back to the pre-import backup and invalidate the session.
+                try:
                     await self._reopen()
                 except Exception as exc:
                     try:
                         restore_backup(backup, acd_path)
                     except Exception:
-                        pass  # cannot restore; still invalidate so no corrupted session is handed out
-                    self._invalidate()
+                        pass
+                    await self._invalidate()
                     raise SessionError(
-                        f"import failed and was rolled back: {exc}"
+                        f"import succeeded but reopen/verify failed and was rolled back: {exc}"
                     ) from exc
             finally:
                 try:
@@ -236,7 +312,7 @@ class ProjectSession:
                     restore_backup(backup, acd_path)
                 except Exception:
                     pass  # cannot restore; still invalidate so no corrupted session is handed out
-                self._invalidate()
+                await self._invalidate()
                 raise SessionError(
                     f"save failed and was rolled back: {exc}"
                 ) from exc
@@ -324,7 +400,7 @@ class ProjectSession:
                     restore_backup(backup, acd_path)
                 except Exception:
                     pass  # cannot restore; still invalidate so no corrupted session is handed out
-                self._invalidate()
+                await self._invalidate()
                 raise SessionError(
                     f"save_as failed and was rolled back: {exc}"
                 ) from exc

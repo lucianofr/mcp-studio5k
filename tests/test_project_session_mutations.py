@@ -59,13 +59,19 @@ async def test_apply_import_success_backs_up_imports_and_reopens(tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_import_failure_restores_backup_and_invalidates(tmp_path):
+async def test_import_failure_restores_backup_and_raises(tmp_path):
+    """Import failure restores backup, raises SessionError.
+
+    Session stays ACTIVE because _reopen() succeeds after the failed import
+    (Bug C2 fix: only invalidate when reopen also fails).
+    """
     cfg, session, acd = await _open_session(tmp_path)
     FakeLogixProject.fail_import = True
     with pytest.raises(SessionError):
         await session.apply_l5x_import(L5X_SAFE, "Controller/Routine[@Name='R1']", "CANCEL_ON_COLL")
     assert acd.read_bytes() == b"ACD-CONTENT-ORIGINAL"
-    assert session.status()["active"] is False
+    # Session stays active: reopen succeeded, so project is still usable.
+    assert session.status()["active"] is True
     assert session.status()["write_count"] == 0
 
 
