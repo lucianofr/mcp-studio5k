@@ -69,7 +69,10 @@ class ProjectSession:
             project = await self._sdk_cls.open_logix_project(str(resolved))
             if self._project is not None:
                 try:
-                    await project.close()
+                    import inspect
+                    _closed = project.close()
+                    if inspect.isawaitable(_closed):
+                        await _closed
                 finally:
                     raise SessionError("a project is already open; close it first")
             self._project = project
@@ -90,10 +93,14 @@ class ProjectSession:
             self._write_count = 0
 
     async def close(self) -> None:
+        import inspect
+
         async with self._lock:
             if self._project is None:
                 return
-            await self._project.close()
+            _closed = self._project.close()
+            if inspect.isawaitable(_closed):
+                await _closed
             self._project = None
             self._path = None
 
