@@ -8,6 +8,9 @@ Configuration is environment-driven (see config.load_config):
   MCP_S5K_READ_ONLY      "true" (default) hides all write tools
   MCP_S5K_CHANGE_TOKEN_SALT  server secret, required (>=16 chars) when writable
   MCP_S5K_PROJECT_FILE   (optional) .ACD to open at startup; needs the SDK present
+  MCP_S5K_SDK_PORT       (optional) explicit engine port; unset → auto-allocate a
+                         free port per process (exported as LDSDKService__APIPort
+                         before the SDK loads) so instances run isolated engines
 
 The Rockwell ``logix_designer_sdk`` is a private, Windows-only, licensed wheel. When
 it is absent the server still starts so the client can connect and enumerate tools;
