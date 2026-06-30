@@ -11,6 +11,7 @@ from pathlib import Path
 
 _LOCK_SUFFIX = ".mcp-s5k.lock"
 _CREATE_TIME_SLOP = 1.0  # seconds tolerance comparing process create-time
+_RECLAIM_ATTEMPTS = 5  # bounded retries when racing to reclaim a stale lock
 
 
 class ProjectLockError(Exception):
@@ -65,27 +66,35 @@ class ProjectLock:
         )
 
     def acquire(self) -> None:
+        # O_CREAT|O_EXCL is the SINGLE claim primitive: at most one creator wins,
+        # atomically, even across processes. A stale lock (dead/PID-reused owner)
+        # is removed and the create retried; whoever wins the next exclusive
+        # create is the sole owner. The loser re-reads, sees the winner's live
+        # payload, and is rejected — so two instances can never both believe they
+        # hold the same .ACD (the reclaim double-acquire window is closed).
         payload = self._payload()
-        try:
-            fd = os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            if _owner_alive(_read(self._lock_path)):
-                raise ProjectLockError(
-                    f"project already open in another instance: {self._acd.name}"
-                )
-            self._reclaim(payload)
+        for _ in range(_RECLAIM_ATTEMPTS):
+            try:
+                fd = os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                if _owner_alive(_read(self._lock_path)):
+                    raise ProjectLockError(
+                        f"project already open in another instance: {self._acd.name}"
+                    )
+                # Stale owner: drop it and retry the atomic create.
+                try:
+                    os.unlink(self._lock_path)
+                except FileNotFoundError:
+                    pass
+                continue
+            with os.fdopen(fd, "w") as handle:
+                handle.write(payload)
             self._held = True
             return
-        with os.fdopen(fd, "w") as handle:
-            handle.write(payload)
-        self._held = True
-
-    def _reclaim(self, payload: str) -> None:
-        tmp = self._lock_path.with_name(self._lock_path.name + f".{self._pid}.tmp")
-        tmp.write_text(payload)
-        os.replace(tmp, self._lock_path)  # atomic
-        if _read(self._lock_path).get("pid") != self._pid:
-            raise ProjectLockError(f"lost lock-reclaim race for {self._acd.name}")
+        # Repeated contention on a stale lock: a live owner kept winning.
+        raise ProjectLockError(
+            f"could not acquire lock for {self._acd.name} (contended)"
+        )
 
     def release(self) -> None:
         if not self._held:

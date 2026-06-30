@@ -96,7 +96,12 @@ class ProjectSession:
         async with self._lock:
             # Ensure THIS process's engine is up before any SDK call.
             if self._engine_ensure is not None:
-                await self._engine_ensure()
+                try:
+                    await self._engine_ensure()
+                except Exception as exc:
+                    raise SessionError(
+                        f"engine could not be started: {exc}"
+                    ) from exc
             # Advisory lock: a separate filesystem gate acquired BEFORE the SDK
             # call so an already-locked project never reaches the engine. Raises
             # ProjectLockError if another live instance holds the same .ACD. This
@@ -136,7 +141,8 @@ class ProjectSession:
                     raise SessionError("a project is already open; close it first")
             self._project = project
             self._path = resolved
-            self._lock_file = plock
+            if plock is not None:
+                self._lock_file = plock
             self._write_count = 0
 
     async def create(

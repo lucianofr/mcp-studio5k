@@ -80,3 +80,12 @@ async def test_restart_retracks_pid(patched):
     assert second != first
     await mgr.shutdown()
     assert second in patched["terminated"]
+
+
+async def test_concurrent_ensure_single_spawn(patched):
+    import asyncio
+
+    mgr = sdk_runtime.EngineManager(info=_INFO, port=55100)
+    await asyncio.gather(mgr.ensure(), mgr.ensure())
+    # The op-lock serializes the two calls; the second adopts the first's engine.
+    assert len(patched["spawned"]) == 1

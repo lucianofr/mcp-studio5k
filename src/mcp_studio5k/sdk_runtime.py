@@ -165,12 +165,20 @@ class EngineManager:
         self._allocate_port = allocate_port
         self._proc = None
         self._did_spawn = False
+        # Serializes ensure/restart/shutdown: the restart_engine MCP tool calls
+        # restart() WITHOUT the session lock, so without this the stateful fields
+        # (_proc/_port/_did_spawn) could be raced by a concurrent ensure().
+        self._op_lock = asyncio.Lock()
 
     @property
     def port(self) -> int:
         return self._port
 
     async def ensure(self, *, max_attempts: int = 5) -> int:
+        async with self._op_lock:
+            return await self._ensure_locked(max_attempts=max_attempts)
+
+    async def _ensure_locked(self, *, max_attempts: int = 5) -> int:
         for _ in range(max_attempts):
             pid = _find_running_pid(self._port)
             if pid is not None:
@@ -186,7 +194,12 @@ class EngineManager:
             else:
                 self._proc = await _spawn_server(self._info.server_exe_path)
                 self._did_spawn = True
-                pid = await _wait_for_pid(self._port)
+                try:
+                    pid = await _wait_for_pid(self._port)
+                except Exception:
+                    # Spawned but never came up: don't leave it tracked/dangling.
+                    await self._terminate_proc()
+                    raise
                 if _proc_owns(self._proc, pid):
                     await self._assert_loopback()
                     return pid
@@ -203,17 +216,21 @@ class EngineManager:
         )
 
     async def restart(self) -> int:
-        existing = _find_running_pid(self._port)
-        if existing is not None and (self._did_spawn or _proc_owns(self._proc, existing)):
-            await _terminate_pid(existing)
-        await self._terminate_proc()
-        self._proc = None
-        self._did_spawn = False
-        return await self.ensure()
+        async with self._op_lock:
+            existing = _find_running_pid(self._port)
+            if existing is not None and (
+                self._did_spawn or _proc_owns(self._proc, existing)
+            ):
+                await _terminate_pid(existing)
+            await self._terminate_proc()
+            self._proc = None
+            self._did_spawn = False
+            return await self._ensure_locked()
 
     async def shutdown(self) -> None:
-        if self._did_spawn:
-            await self._terminate_proc()
+        async with self._op_lock:
+            if self._did_spawn:
+                await self._terminate_proc()
 
     async def _assert_loopback(self) -> None:
         if not await check_loopback_bound(self._port):

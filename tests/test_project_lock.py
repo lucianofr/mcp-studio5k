@@ -47,3 +47,25 @@ def test_release_is_idempotent(tmp_path):
     lock.acquire()
     lock.release()
     lock.release()  # no raise
+
+
+def test_post_reclaim_single_owner(tmp_path, monkeypatch):
+    import os as _os
+    acd = _acd(tmp_path)
+    # A stale lock from a dead owner sits on disk.
+    dead = ProjectLock(acd, port=1, pid=999999)
+    dead.acquire()
+    # Treat only the current process as alive; 999999 is dead.
+    real = _os.getpid()
+    monkeypatch.setattr(
+        "mcp_studio5k.project_lock._owner_alive",
+        lambda data: data.get("pid") == real,
+    )
+    a = ProjectLock(acd, port=2)
+    a.acquire()  # reclaims the stale lock
+    assert a.lock_path.exists()
+    # After reclaim a live owner holds it; a second acquirer must be rejected.
+    b = ProjectLock(acd, port=3)
+    with pytest.raises(ProjectLockError):
+        b.acquire()
+    a.release()
