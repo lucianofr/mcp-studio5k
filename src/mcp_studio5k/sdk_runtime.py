@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from pathlib import Path
 
 from mcp_studio5k.sdk_discovery import SdkInfo
@@ -31,12 +32,24 @@ def _listening_conns(port: int) -> list:
     ]
 
 
+def _is_loopback_ip(ip: str) -> bool:
+    """True if ip is an IPv4/IPv6 loopback address (127.0.0.0/8, ::1, ::ffff:127.x)."""
+    try:
+        return ipaddress.ip_address(ip).is_loopback
+    except ValueError:
+        return False
+
+
 async def check_loopback_bound(port: int = DEFAULT_SDK_PORT) -> bool:
-    """True only if every listener on port is bound to 127.0.0.1."""
+    """True only if every listener on port is bound to a loopback address.
+
+    The SDK server binds both IPv4 (127.0.0.1) and IPv6 (::1) loopback; both are
+    local-only, so accept either. Reject any non-loopback (LAN/0.0.0.0/::) bind.
+    """
     conns = _listening_conns(port)
     if not conns:
         return False
-    return all(conn.laddr.ip == LOOPBACK_IP for conn in conns)
+    return all(_is_loopback_ip(conn.laddr.ip) for conn in conns)
 
 
 def _find_running_pid(port: int) -> int | None:
