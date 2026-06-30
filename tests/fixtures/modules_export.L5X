@@ -1,0 +1,16 @@
+<RSLogix5000Content SchemaRevision="1.0">
+  <Controller Name="C1">
+    <Modules>
+      <Module Name="Local" CatalogNumber="1756-L83E" Vendor="1" ProductType="14" ProductCode="166" Major="33" Minor="11" ParentModule="" ParentModPortId="0">
+        <Ports>
+          <Port Id="1" Type="ICP" Address="0" Upstream="false"/>
+        </Ports>
+      </Module>
+      <Module Name="AI_01" CatalogNumber="1756-IF8" Vendor="1" ProductType="10" ProductCode="74" Major="3" Minor="1" ParentModule="Local" ParentModPortId="1">
+        <Ports>
+          <Port Id="1" Type="ICP" Address="3" Upstream="true"/>
+        </Ports>
+      </Module>
+    </Modules>
+  </Controller>
+</RSLogix5000Content>

@@ -23,6 +23,7 @@ from pathlib import Path
 from .envelope import err_envelope, ok_envelope
 from .inspect import strip_comments
 from .l5x.diff import diff_routines
+from .l5x.import_result import parse_import_errors, summarize_imported_elements
 from .l5x.parse import parse_l5x
 from .l5x.validate import validate_l5x
 from .safety import RateLimitError, SafetyError, check_safety_exclusions
@@ -32,6 +33,38 @@ from .safety import RateLimitError, SafetyError, check_safety_exclusions
 # ---------------------------------------------------------------------------
 
 _TOKEN_SEPARATOR = b"\x00"
+
+
+# ---------------------------------------------------------------------------
+# Structured import outcomes — a failed import returns a machine-correctable list
+# of {rung, instrucao, codigo_erro, mensagem}; success reports what was imported.
+# These wrap the apply call so the SDK's free-text reply becomes a turnable signal.
+# ---------------------------------------------------------------------------
+
+
+def _import_failure_envelope(exc: Exception) -> dict:
+    """Build an err envelope whose ``data.errors`` is the structured failure list.
+
+    Keeps the human-readable ``error`` string (backwards compatible) and adds a
+    parsed ``errors`` array so a client can fix the offending rung/instruction.
+    """
+    message = str(exc)
+    env = err_envelope(message)
+    env["data"] = {"status": "error", "errors": parse_import_errors(message)}
+    return env
+
+
+def _import_success_envelope(applied: dict, l5x_content: str, *, max_bytes: int) -> dict:
+    """Build an ok envelope carrying ``status="ok"`` and ``elementos_importados``."""
+    return ok_envelope(
+        {
+            **applied,
+            "status": "ok",
+            "elementos_importados": summarize_imported_elements(
+                l5x_content, max_bytes=max_bytes
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -263,10 +296,16 @@ async def import_l5x(
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
-    # All guards passed — apply exactly once
-    await session.apply_l5x_import(l5x_content, x_path, collision_option)
-    return ok_envelope(
-        {"applied": True, "x_path": x_path, "collision_option": collision_option}
+    # All guards passed — apply exactly once.  A failed import (rollback or raw SDK
+    # fault) is turned into a structured, machine-correctable error list.
+    try:
+        await session.apply_l5x_import(l5x_content, x_path, collision_option)
+    except Exception as exc:
+        return _import_failure_envelope(exc)
+    return _import_success_envelope(
+        {"applied": True, "x_path": x_path, "collision_option": collision_option},
+        l5x_content,
+        max_bytes=max_bytes,
     )
 
 
@@ -342,9 +381,14 @@ async def import_tag_l5x(
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
-    await session.apply_l5x_import(l5x_content, x_path, collision_option)
-    return ok_envelope(
-        {"applied": True, "x_path": x_path, "collision_option": collision_option}
+    try:
+        await session.apply_l5x_import(l5x_content, x_path, collision_option)
+    except Exception as exc:
+        return _import_failure_envelope(exc)
+    return _import_success_envelope(
+        {"applied": True, "x_path": x_path, "collision_option": collision_option},
+        l5x_content,
+        max_bytes=max_bytes,
     )
 
 
@@ -444,17 +488,19 @@ async def _apply_file_import(
 
     try:
         await session.apply_l5x_import(content, x_path, collision_option)
-    except Exception as exc:  # SessionError/rollback or SDK failure → clean envelope
-        return err_envelope(str(exc))
+    except Exception as exc:  # SessionError/rollback or SDK failure → structured errors
+        return _import_failure_envelope(exc)
 
-    return ok_envelope(
+    return _import_success_envelope(
         {
             "applied": True,
             "x_path": x_path,
             "collision_option": collision_option,
             "source": str(Path(path)),
             "bytes": byte_len,
-        }
+        },
+        content,
+        max_bytes=max_bytes,
     )
 
 

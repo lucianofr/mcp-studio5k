@@ -46,11 +46,68 @@ def build_server(
 
     @mcp.tool(annotations=_READ_ONLY)
     async def list_tags(
-        scope: str, name_filter: "str | None" = None, page_size: int = 100, cursor: "str | None" = None
+        scope: str, name_filter: "str | None" = None,
+        datatype_filter: "str | None" = None,
+        page_size: int = 100, cursor: "str | None" = None
     ) -> dict:
+        """List tags in a scope with their real data type and dimension (grounding read).
+
+        ``scope`` is "controller" or a program name. ``name_filter`` and
+        ``datatype_filter`` are case-insensitive substring filters. Each tag is
+        ``{name, data_type, scope, dimension}`` read from the open project — use this
+        to confirm a tag exists and its type before authoring logic.
+        """
         return await inspect_mod.list_tags(
-            session, scope, name_filter=name_filter, page_size=page_size, cursor=cursor,
-            max_bytes=config.max_l5x_bytes,
+            session, scope, name_filter=name_filter, datatype_filter=datatype_filter,
+            page_size=page_size, cursor=cursor, max_bytes=config.max_l5x_bytes,
+        )
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def get_udt_definition(name: str) -> dict:
+        """Return a UDT's member layout from the open project (grounding read).
+
+        Yields ``{name, family, class, members:[{name, data_type, dimension, radix,
+        hidden}]}`` so a client never guesses UDT member names or types. Err when the
+        UDT does not exist.
+        """
+        return await inspect_mod.get_udt_definition(
+            session, name, max_bytes=config.max_l5x_bytes
+        )
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def get_aoi_signature(name: str) -> dict:
+        """Return an Add-On Instruction's parameter signature (grounding read).
+
+        Yields ``{name, revision, parameters:[...], in, out, in_out}`` where each
+        parameter is ``{name, data_type, usage, required, visible, dimension}``,
+        grouped by IN/OUT/InOut. Use before calling an AOI so arguments and types are
+        correct. Err when the AOI does not exist.
+        """
+        return await inspect_mod.get_aoi_signature(
+            session, name, max_bytes=config.max_l5x_bytes
+        )
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def list_programs_routines() -> dict:
+        """List every program with its routines and each routine's language (grounding read).
+
+        Yields ``[{program, routines:[{name, language}]}]`` (language = RLL/ST/FBD/SFC)
+        — the real program/routine map of the open project in one call.
+        """
+        return await inspect_mod.list_programs_routines(
+            session, max_bytes=config.max_l5x_bytes
+        )
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def get_module_config() -> dict:
+        """List configured I/O modules and their addressing (grounding read).
+
+        Yields ``[{name, catalog_number, vendor, product_type, product_code, major,
+        minor, parent_module, parent_mod_port_id, ports:[{id, type, address,
+        upstream}]}]`` so a client can reference I/O by real slot/IP addressing.
+        """
+        return await inspect_mod.get_module_config(
+            session, max_bytes=config.max_l5x_bytes
         )
 
     @mcp.tool(annotations=_READ_ONLY)
