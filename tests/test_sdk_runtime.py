@@ -116,7 +116,9 @@ async def test_ensure_starts_process_when_down(tmp_path, monkeypatch):
 
     pid = await ensure_server_running(info, port=SDK_PORT)
 
-    spawn.assert_awaited_once_with(info.server_exe_path, SDK_PORT)
+    # --port is a no-op; the engine binds via inherited LDSDKService__APIPort env,
+    # so _spawn_server now takes only the exe path.
+    spawn.assert_awaited_once_with(info.server_exe_path)
     assert pid == 9001
 
 
