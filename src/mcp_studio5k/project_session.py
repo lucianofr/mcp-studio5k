@@ -12,6 +12,7 @@ log = logging.getLogger("mcp_studio5k")
 
 from mcp_studio5k.backup import BackupError, make_verified_backup, restore_backup
 from mcp_studio5k.engine import is_engine_fault
+from mcp_studio5k.project_lock import ProjectLock, ProjectLockError
 from mcp_studio5k.safety import SafetyError, check_safety_exclusions
 
 UNC_PREFIXES = ("\\\\", "//")
@@ -59,14 +60,17 @@ class ProjectSession:
         *,
         sdk_project_cls,
         engine_restart: "Callable[[], Awaitable[int]] | None" = None,
+        engine_ensure: "Callable[[], Awaitable[int]] | None" = None,
     ) -> None:
         self._config = config
         self._sdk_cls = sdk_project_cls
         self._engine_restart = engine_restart
+        self._engine_ensure = engine_ensure
         self._lock = asyncio.Lock()
         self._project = None
         self._path: Path | None = None
         self._write_count = 0
+        self._lock_file: ProjectLock | None = None
 
     def status(self) -> dict[str, Any]:
         """Lock-free snapshot of session state.
@@ -90,6 +94,20 @@ class ProjectSession:
     async def open(self, path: Path) -> None:
         resolved = resolve_under_root(path, self._config.project_root)
         async with self._lock:
+            # Ensure THIS process's engine is up before any SDK call.
+            if self._engine_ensure is not None:
+                await self._engine_ensure()
+            # Advisory lock: a separate filesystem gate acquired BEFORE the SDK
+            # call so an already-locked project never reaches the engine. Raises
+            # ProjectLockError if another live instance holds the same .ACD. This
+            # does NOT change the SDK-open-before-single-project-guard order below.
+            # Skip when THIS session already holds a lock (a project is open): the
+            # single-project guard below owns the same-session "already open" case,
+            # and our own held lockfile would otherwise self-reject.
+            plock = None
+            if self._lock_file is None:
+                plock = ProjectLock(resolved, port=getattr(self._config, "sdk_port", 0))
+                plock.acquire()
             # SDK open occurs INSIDE the lock BEFORE the single-project guard.
             # cycle-15.5 asserts call order ["enter","exit","enter","exit"], which
             # requires the SDK call to happen unconditionally under the lock.
@@ -97,6 +115,8 @@ class ProjectSession:
             try:
                 project = await self._sdk_cls.open_logix_project(str(resolved))
             except Exception as exc:
+                if plock is not None:
+                    plock.release()
                 if self._project is None:
                     # Our session has no project — orphan is at SDK level.
                     # Wrap so callers get an actionable SessionError, not a raw SDK error.
@@ -105,6 +125,8 @@ class ProjectSession:
                     ) from exc
                 raise
             if self._project is not None:
+                if plock is not None:
+                    plock.release()
                 try:
                     import inspect
                     _closed = project.close()
@@ -114,6 +136,7 @@ class ProjectSession:
                     raise SessionError("a project is already open; close it first")
             self._project = project
             self._path = resolved
+            self._lock_file = plock
             self._write_count = 0
 
     async def create(
@@ -123,10 +146,19 @@ class ProjectSession:
         async with self._lock:
             if self._project is not None:
                 raise SessionError("a project is already open; close it first")
-            self._project = await self._sdk_cls.create_new_project(
-                str(resolved), major_revision, processor_type_name, controller_name
-            )
+            if self._engine_ensure is not None:
+                await self._engine_ensure()
+            plock = ProjectLock(resolved, port=getattr(self._config, "sdk_port", 0))
+            plock.acquire()
+            try:
+                self._project = await self._sdk_cls.create_new_project(
+                    str(resolved), major_revision, processor_type_name, controller_name
+                )
+            except Exception:
+                plock.release()
+                raise
             self._path = resolved
+            self._lock_file = plock
             self._write_count = 0
 
     async def close(self) -> None:
@@ -140,6 +172,16 @@ class ProjectSession:
                 await _closed
             self._project = None
             self._path = None
+            if self._lock_file is not None:
+                self._lock_file.release()
+                self._lock_file = None
+
+    async def release_locks(self) -> None:
+        """Release any held advisory lock (best-effort, for process shutdown)."""
+        async with self._lock:
+            if self._lock_file is not None:
+                self._lock_file.release()
+                self._lock_file = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -185,6 +227,9 @@ class ProjectSession:
                 pass  # swallow close errors — we're already in an error path
         self._project = None
         self._path = None
+        if self._lock_file is not None:
+            self._lock_file.release()
+            self._lock_file = None
 
     async def _recover_and_reopen(self) -> None:
         """Restart the engine, then reopen the project. Must be called already-locked.
