@@ -26,10 +26,11 @@ mcp-studio5k                      # run the server
 - **Logix Designer SDK:** `C:\Program Files (x86)\Rockwell Software\Studio 5000\Logix Designer SDK`
   - Python package imported as `logix_designer_sdk` (e.g. `from logix_designer_sdk.enums import ImportCollisionOptions`).
   - Proprietary Rockwell SDK — NOT on PyPI, NOT indexed by Context7. For API semantics inspect the installed package (path above or the active venv `site-packages`), not online docs.
-  - The SDK talks to a backend engine service (`RSLogix5000Services.exe` / `LdSdkService`) over `127.0.0.1:53204`; `sdk_discovery.py` finds the install and probes/connects that port.
+  - The SDK talks to a backend engine service (`RSLogix5000Services.exe` / `LdSdkService`) over loopback; `sdk_discovery.py` finds the install and `sdk_runtime.py` spawns/owns it. The port defaults to `53204` but is per-process: the engine's `--port` CLI flag is a **no-op** — both the engine and its in-process client read the port from `LDSDKService__APIPort` (env), set by `bootstrap.resolve_engine_port()` before the SDK loads. See `MCP_S5K_SDK_PORT` below.
 
 - Config via `MCP_S5K_*` env vars (see `config.py`): `MCP_S5K_PROJECT_ROOT` (all project paths must resolve under it), `MCP_S5K_PROJECT_FILE`, `MCP_S5K_BACKUP_DIR`, `MCP_S5K_READ_ONLY`, `MCP_S5K_MAX_L5X_BYTES`, `MCP_S5K_MAX_EXPORT_BYTES`, `MCP_S5K_CHANGE_TOKEN_SALT` (>=16 chars).
 - `MCP_S5K_AUTO_OPEN` (default OFF): startup auto-open of `MCP_S5K_PROJECT_FILE` is opt-in. By default a fresh server/reconnect lands with no project open — the client opens it explicitly. Set to `1` to restore eager open.
+- `MCP_S5K_SDK_PORT` (optional): explicit engine port for this process. Unset (default) → a free port is auto-allocated per process. Each MCP server process runs its OWN `LdSdkServer` engine on this port (exported as `LDSDKService__APIPort` before the SDK loads), so multiple Claude Code instances can drive different projects in parallel. An advisory `<file>.mcp-s5k.lock` blocks two instances from opening the same `.acd`. Resolved by `bootstrap.resolve_engine_port()`; the process owns its engine and tears it down on shutdown.
 
 ## Architecture
 
@@ -48,3 +49,4 @@ Two layers — **offline L5X authoring** (pure-Python, no SDK) and a **live SDK 
 - All project paths go through `resolve_under_root` — rejects traversal, UNC/device paths, and non-`.acd` suffixes. Don't bypass it.
 - A mutation that fails must leave NO half-written ACD: restore backup, then invalidate so a corrupted session is never handed out.
 - `create()` uses guard-first order (check `_project is None` before SDK call); `open()` deliberately calls the SDK BEFORE the single-project guard (a lifecycle test asserts that call order) — don't "fix" this to match `create`.
+
