@@ -88,6 +88,16 @@ class WriteRateLimiter:
     def count(self) -> int:
         return self._count
 
+    def reset(self) -> None:
+        """Clear the per-session write budget and cooldown.
+
+        Called when the operator explicitly (re)opens a project, so each opened
+        session gets a fresh allowance. The internal verify-reopen inside a
+        mutation does NOT call this — only the operator-facing open path does.
+        """
+        self._count = 0
+        self._last_write = None
+
     def check(self, *, now: float) -> None:
         if self.in_cooldown(now=now):
             raise RateLimitError("write cooldown active; wait before next import")

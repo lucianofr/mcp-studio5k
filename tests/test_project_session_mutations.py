@@ -76,6 +76,42 @@ async def test_import_failure_restores_backup_and_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Persistence regression — import MUST save before the verifying reopen,
+# otherwise _reopen() reloads the unchanged .ACD and discards the import.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_import_saves_before_reopen(tmp_path):
+    cfg, session, acd = await _open_session(tmp_path)
+    FakeLogixProject.calls = []
+    await session.apply_l5x_import(
+        L5X_SAFE, "Controller/Routine[@Name='R1']", "CANCEL_ON_COLL"
+    )
+    calls = FakeLogixProject.calls
+    assert "save" in calls, "import must persist via save() before reopen"
+    import_idx = max(i for i, c in enumerate(calls) if c.startswith("import:"))
+    save_idx = calls.index("save")
+    reopen_close_idx = next(
+        i for i, c in enumerate(calls) if c == "close" and i > import_idx
+    )
+    # save happens after the import and before the verifying reopen (close/open).
+    assert import_idx < save_idx < reopen_close_idx
+
+
+@pytest.mark.asyncio
+async def test_import_save_failure_restores_and_invalidates(tmp_path):
+    cfg, session, acd = await _open_session(tmp_path)
+    FakeLogixProject.fail_save = True
+    with pytest.raises(SessionError):
+        await session.apply_l5x_import(
+            L5X_SAFE, "Controller/Routine[@Name='R1']", "CANCEL_ON_COLL"
+        )
+    assert acd.read_bytes() == b"ACD-CONTENT-ORIGINAL"
+    assert session.status()["active"] is False
+    assert session.status()["write_count"] == 0
+
+
+# ---------------------------------------------------------------------------
 # Cycle 16.3 — expected_project_path mismatch raises before SDK/backup
 # ---------------------------------------------------------------------------
 

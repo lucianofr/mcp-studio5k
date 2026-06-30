@@ -326,7 +326,39 @@ class ProjectSession:
                         f"import failed and was rolled back: {exc}"
                     ) from exc
 
-                # Block 2: REOPEN-TO-VERIFY — import succeeded on disk; verify by reopening.
+                # Block 1b: SAVE — persist the in-memory import to the .ACD BEFORE the
+                # verifying reopen. partial_import_from_xml_file mutates the in-memory
+                # project only; without this save, _reopen() reloads the unchanged file
+                # and silently discards the import (the SDK reports applied=true while
+                # nothing reaches disk). Roll back to the pre-import backup on failure.
+                try:
+                    _save = self._project.save()
+                    if inspect.isawaitable(_save):
+                        await _save
+                except Exception as exc:
+                    try:
+                        restore_backup(backup, acd_path)
+                    except Exception:
+                        pass
+                    if is_engine_fault(exc) and self._engine_restart is not None:
+                        try:
+                            await self._recover_and_reopen()
+                        except Exception:
+                            await self._invalidate()
+                            raise SessionError(
+                                f"engine faulted during post-import save and restart "
+                                f"failed; session invalidated: {exc}"
+                            ) from exc
+                        raise SessionError(
+                            f"engine faulted during post-import save; project rolled "
+                            f"back, re-issue the operation: {exc}"
+                        ) from exc
+                    await self._invalidate()
+                    raise SessionError(
+                        f"import succeeded but save failed and was rolled back: {exc}"
+                    ) from exc
+
+                # Block 2: REOPEN-TO-VERIFY — import saved to disk; verify by reopening.
                 # A failure here means the file was written but the SDK can't reopen it;
                 # we roll back to the pre-import backup.
                 try:
