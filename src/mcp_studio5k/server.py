@@ -129,6 +129,9 @@ def build_server(
             return err_envelope(str(exc))
         except Exception as exc:  # SDK/COM/licensing failures
             return err_envelope(f"open failed: {exc}")
+        # A freshly opened project is a fresh write session: reset the per-session
+        # write budget so the operator gets a full allowance after each open.
+        rate_limiter.reset()
         return ok_envelope({"opened": path})
 
     @mcp.tool(annotations=_DESTRUCTIVE)

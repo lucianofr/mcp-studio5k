@@ -115,3 +115,16 @@ def test_check_raises_when_limit_reached():
     limiter.check(now=2.0)
     with pytest.raises(RateLimitError, match="limit"):
         limiter.check(now=3.0)
+
+
+def test_reset_clears_budget_after_limit_reached():
+    limiter = WriteRateLimiter(limit=2, cooldown_seconds=0.0)
+    limiter.check(now=1.0)
+    limiter.check(now=2.0)
+    limiter.reset()
+    assert limiter.count == 0
+    # Fresh budget after reset: two more writes allowed, third refused again.
+    limiter.check(now=3.0)
+    limiter.check(now=4.0)
+    with pytest.raises(RateLimitError, match="limit"):
+        limiter.check(now=5.0)
