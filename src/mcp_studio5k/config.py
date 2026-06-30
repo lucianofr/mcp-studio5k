@@ -88,14 +88,29 @@ def _parse_allowlist(raw: str | None) -> frozenset[str]:
     return frozenset(token for token in items if token)
 
 
+def _resolve_sdk_port() -> int:
+    # The per-process engine port is exported by bootstrap.resolve_engine_port()
+    # into LDSDKService__APIPort before config loads. Fall back to the historical
+    # default if it is absent or unparsable (read-only / no-SDK boots still work).
+    raw = os.environ.get("LDSDKService__APIPort")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_SDK_PORT
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return DEFAULT_SDK_PORT
+
+
 def load_config() -> Config:
     """Build Config from environment; resolve and validate required directories."""
     project_root = _resolve_existing_dir(_require_env(ENV_PROJECT_ROOT), "project_root")
     backup_dir = _resolve_existing_dir(_require_env(ENV_BACKUP_DIR), "backup_dir")
+    sdk_port = _resolve_sdk_port()
     log_dir = (
         Path(os.environ.get("LOCALAPPDATA", str(backup_dir.parent)))
         / "mcp-studio5k"
         / "logs"
+        / str(sdk_port)
     ).resolve()
 
     read_only = _parse_read_only(os.environ.get(ENV_READ_ONLY))
@@ -129,4 +144,5 @@ def load_config() -> Config:
         change_token_salt=change_token_salt,
         max_l5x_bytes=max_l5x_bytes,
         max_export_bytes=max_export_bytes,
+        sdk_port=sdk_port,
     )
