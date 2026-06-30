@@ -1,0 +1,17 @@
+<RSLogix5000Content SchemaRevision="1.0">
+  <Controller Name="C1">
+    <Programs>
+      <Program Name="MainProgram">
+        <Routines>
+          <Routine Name="MainRoutine" Type="RLL"/>
+          <Routine Name="Scaling" Type="ST"/>
+        </Routines>
+      </Program>
+      <Program Name="SafetyProgram">
+        <Routines>
+          <Routine Name="Interlocks" Type="RLL"/>
+        </Routines>
+      </Program>
+    </Programs>
+  </Controller>
+</RSLogix5000Content>

@@ -1,0 +1,14 @@
+<RSLogix5000Content SchemaRevision="1.0" TargetType="DataType" TargetName="Motor_UDT">
+  <Controller Name="C1">
+    <DataTypes>
+      <DataType Name="Motor_UDT" Family="NoFamily" Class="User">
+        <Members>
+          <Member Name="Speed" DataType="REAL" Dimension="0" Radix="Float" Hidden="false"/>
+          <Member Name="Run" DataType="BOOL" Dimension="0" Radix="Decimal" Hidden="false"/>
+          <Member Name="Faults" DataType="DINT" Dimension="4" Radix="Decimal" Hidden="false"/>
+          <Member Name="ZZZZZZZZZZRun" DataType="SINT" Dimension="0" Radix="Decimal" Hidden="true"/>
+        </Members>
+      </DataType>
+    </DataTypes>
+  </Controller>
+</RSLogix5000Content>

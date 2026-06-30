@@ -1,0 +1,14 @@
+<RSLogix5000Content SchemaRevision="1.0" TargetType="AddOnInstructionDefinition" TargetName="PID_Loop">
+  <Controller Name="C1">
+    <AddOnInstructionDefinitions>
+      <AddOnInstructionDefinition Name="PID_Loop" Revision="1.2">
+        <Parameters>
+          <Parameter Name="EnableIn" TagType="Base" DataType="BOOL" Usage="Input" Required="false" Visible="false"/>
+          <Parameter Name="PV" TagType="Base" DataType="REAL" Usage="Input" Required="true" Visible="true"/>
+          <Parameter Name="CV" TagType="Base" DataType="REAL" Usage="Output" Required="true" Visible="true"/>
+          <Parameter Name="Cfg" TagType="Base" DataType="PID_Cfg" Usage="InOut" Required="true" Visible="true" Dimension="0"/>
+        </Parameters>
+      </AddOnInstructionDefinition>
+    </AddOnInstructionDefinitions>
+  </Controller>
+</RSLogix5000Content>
