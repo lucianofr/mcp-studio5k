@@ -573,3 +573,126 @@ async def import_routine_l5x(
         allowed_target_types=_ROUTINE_TARGET_TYPES,
         now=now,
     )
+
+
+async def import_rungs_l5x(
+    session,
+    l5x_content: str,
+    x_path: str,
+    *,
+    insert_position: int,
+    replace_count: int = 0,
+    confirmed: bool = False,
+    exclusions,
+    rate_limiter,
+    max_bytes: int,
+    now: "float | None" = None,
+) -> dict:
+    """Import rungs into an existing routine (SDK partial_import_rungs).
+
+    Guard chain mirrors import_tag_l5x: confirmed gate, payload target check,
+    size cap, safety exclusions, rate limit, then the session mutation with
+    full backup/rollback semantics. ``replace_count`` existing rungs starting
+    at ``insert_position`` are replaced by the imported ones.
+    """
+    if confirmed is not True:
+        return err_envelope("import refused: confirmed=True is required (human gate)")
+
+    if 'TargetType="Rung"' not in l5x_content and "<Rung" not in l5x_content:
+        return err_envelope("import_rungs_l5x refused: payload contains no rungs")
+
+    if insert_position < 0 or replace_count < 0:
+        return err_envelope(
+            "import refused: insert_position and replace_count must be >= 0"
+        )
+
+    if len(l5x_content.encode("utf-8")) > max_bytes:
+        return err_envelope(
+            f"import refused: l5x_content size exceeds max_bytes ({max_bytes})"
+        )
+
+    try:
+        hits = check_safety_exclusions(l5x_content, exclusions, max_bytes=max_bytes)
+    except SafetyError as exc:
+        return err_envelope(f"import refused: {exc}")
+    if hits:
+        return err_envelope(
+            "import refused: content touches safety-excluded tags: "
+            + ", ".join(sorted(hits))
+        )
+
+    try:
+        rate_limiter.check(now=now if now is not None else time.monotonic())
+    except RateLimitError as exc:
+        return err_envelope(f"import refused: {exc}")
+
+    try:
+        await session.apply_rungs_import(
+            l5x_content, x_path, insert_position, replace_count
+        )
+    except Exception as exc:
+        return _import_failure_envelope(exc)
+    return _import_success_envelope(
+        {
+            "applied": True,
+            "x_path": x_path,
+            "insert_position": insert_position,
+            "replace_count": replace_count,
+        },
+        l5x_content,
+        max_bytes=max_bytes,
+    )
+
+
+async def import_with_target_l5x(
+    session,
+    l5x_content: str,
+    x_path: str,
+    target_name: str,
+    *,
+    confirmed: bool = False,
+    exclusions,
+    rate_limiter,
+    max_bytes: int,
+    now: "float | None" = None,
+) -> dict:
+    """Import a single component renaming it to ``target_name`` on the way in.
+
+    Wraps SDK partial_import_with_target (not valid for Trends/Modules). Same
+    guard chain as the other imports.
+    """
+    if confirmed is not True:
+        return err_envelope("import refused: confirmed=True is required (human gate)")
+
+    if not target_name or not target_name.strip():
+        return err_envelope("import refused: target_name must be non-empty")
+
+    if len(l5x_content.encode("utf-8")) > max_bytes:
+        return err_envelope(
+            f"import refused: l5x_content size exceeds max_bytes ({max_bytes})"
+        )
+
+    try:
+        hits = check_safety_exclusions(l5x_content, exclusions, max_bytes=max_bytes)
+    except SafetyError as exc:
+        return err_envelope(f"import refused: {exc}")
+    if hits:
+        return err_envelope(
+            "import refused: content touches safety-excluded tags: "
+            + ", ".join(sorted(hits))
+        )
+
+    try:
+        rate_limiter.check(now=now if now is not None else time.monotonic())
+    except RateLimitError as exc:
+        return err_envelope(f"import refused: {exc}")
+
+    try:
+        await session.apply_import_with_target(l5x_content, x_path, target_name)
+    except Exception as exc:
+        return _import_failure_envelope(exc)
+    return _import_success_envelope(
+        {"applied": True, "x_path": x_path, "target_name": target_name},
+        l5x_content,
+        max_bytes=max_bytes,
+    )

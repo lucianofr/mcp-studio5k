@@ -6,6 +6,11 @@
 
 ---
 
+## 2026-07-01
+
+- impl-v31-sdk-tools-20260701 | Completed | 21 new MCP tools covering ALL v31-compatible SDK 2.0.2 ops (comm/mode/online/download/upload/set_tag_value 12 types/safety reads/rungs+target imports/convert/create/processor types). Excluded by gate: build v37, safety-lock v37, protection v32, SD v34. SdkOpsMixin + _import_file_mutation_locked refactor; 41 tools writable / 20 read-only; full suite green.
+- analysis-verify-tool-feasibility-20260701 | Completed | SDK 2.0.2 `LogixProject.build(RequestedBuildTarget)` = Verify Controller (v37+, whole-controller, mutates ACD). Feasible: session.build mirroring save() backup/rollback, verify_project tool mirroring save_project. Spike pending: diagnostics via operation_events logger; save-after-build necessity.
+
 ## 2026-06-29
 
 <!-- Format: - report-name | Status | One-line summary -->

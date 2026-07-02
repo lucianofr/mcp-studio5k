@@ -14,11 +14,15 @@ from mcp_studio5k.backup import BackupError, make_verified_backup, restore_backu
 from mcp_studio5k.engine import is_engine_fault
 from mcp_studio5k.project_lock import ProjectLock, ProjectLockError
 from mcp_studio5k.safety import SafetyError, check_safety_exclusions
+from mcp_studio5k.sdk_ops import SdkOpsMixin
 
 UNC_PREFIXES = ("\\\\", "//")
 
-# Supported data types for get_tag_value dispatch.
-_TAG_VALUE_TYPES = frozenset({"bool", "dint", "int", "real", "string"})
+# Supported data types for get_tag_value dispatch (full v31 SDK typed surface).
+_TAG_VALUE_TYPES = frozenset({
+    "bool", "sint", "int", "dint", "lint", "usint", "uint", "udint", "ulint",
+    "string", "real", "lreal",
+})
 
 # Token that identifies a benign "nothing changed" import outcome from the SDK.
 # The SDK raises OperationNotPerformedError whose str() contains this substring.
@@ -51,7 +55,7 @@ def resolve_under_root(path: "Path | str", root: Path) -> Path:
     return resolved
 
 
-class ProjectSession:
+class ProjectSession(SdkOpsMixin):
     """One active LogixProject per session; all SDK ops under one lock."""
 
     def __init__(
@@ -300,148 +304,164 @@ class ProjectSession:
                     f"import would touch excluded safety tags: {touched}"
                 )
 
-            acd_path = self._path
-            try:
-                backup = make_verified_backup(
-                    acd_path,
-                    self._config.backup_dir,
-                    rotation=self._config.backup_rotation,
+            async def _sdk_import(tmp_l5x: str) -> None:
+                import inspect
+
+                from logix_designer_sdk.enums import ImportCollisionOptions
+
+                _imp = self._project.partial_import_from_xml_file(
+                    x_path, tmp_l5x, ImportCollisionOptions[collision_option]
                 )
-            except BackupError as exc:
-                raise SessionError(f"cannot create backup before write: {exc}") from exc
+                if inspect.isawaitable(_imp):
+                    await _imp
 
-            # Write L5X content to a temp file; SDK expects a file path, not raw XML.
-            self._config.backup_dir.mkdir(parents=True, exist_ok=True)
-            fd, tmp_l5x = tempfile.mkstemp(
-                suffix=".L5X", dir=str(self._config.backup_dir)
+            await self._import_file_mutation_locked(l5x_content, _sdk_import)
+
+    async def _import_file_mutation_locked(self, l5x_content: str, sdk_import) -> None:
+        """Backup → tmp L5X → sdk_import(tmp) → save → reopen-to-verify → rollback.
+
+        Extracted body of apply_l5x_import so rung/target imports (sdk_ops.py)
+        share EXACTLY the C1 NO_CHANGES / C2 reopen-on-failure / engine-fault
+        semantics. MUST be called with self._lock already held and the safety
+        exclusion check already performed; ``sdk_import`` receives the temp
+        .L5X path and performs the SDK import call.
+        """
+        import inspect
+
+        acd_path = self._path
+        try:
+            backup = make_verified_backup(
+                acd_path,
+                self._config.backup_dir,
+                rotation=self._config.backup_rotation,
             )
+        except BackupError as exc:
+            raise SessionError(f"cannot create backup before write: {exc}") from exc
+
+        # Write L5X content to a temp file; SDK expects a file path, not raw XML.
+        self._config.backup_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp_l5x = tempfile.mkstemp(
+            suffix=".L5X", dir=str(self._config.backup_dir)
+        )
+        try:
+            os.close(fd)
+            Path(tmp_l5x).write_text(l5x_content, encoding="utf-8")
+            # Block 1: IMPORT ONLY — reopen is intentionally separate (see Block 2).
+            # Keeping the two operations in separate try blocks ensures that a
+            # reopen failure is NEVER mislabeled as an import failure and that
+            # the benign NO_CHANGES token check cannot swallow a reopen error.
             try:
-                os.close(fd)
-                Path(tmp_l5x).write_text(l5x_content, encoding="utf-8")
-                # Block 1: IMPORT ONLY — reopen is intentionally separate (see Block 2).
-                # Keeping the two operations in separate try blocks ensures that a
-                # reopen failure is NEVER mislabeled as an import failure and that
-                # the benign NO_CHANGES token check cannot swallow a reopen error.
+                await sdk_import(tmp_l5x)
+            except Exception as exc:
+                # C1: NO_CHANGES is checked FIRST (before engine-fault) — intentional order:
+                # a benign no-op is mutually exclusive with a real engine fault (a faulted
+                # server won't also emit the NO_CHANGES token), so checking it first keeps
+                # the success path fast without masking real faults.
+                # No restore, no invalidate, no write_count bump; session stays open.
+                # NOTE: this check applies ONLY to the import call, not to _reopen().
+                if IMPORT_NO_CHANGES_TOKEN in str(exc):
+                    return  # benign; outer finally removes tmp_l5x
+
+                # Restore backup regardless of fault type.
                 try:
-                    import inspect
+                    restore_backup(backup, acd_path)
+                except Exception:
+                    pass
 
-                    from logix_designer_sdk.enums import ImportCollisionOptions
-
-                    _imp = self._project.partial_import_from_xml_file(
-                        x_path, tmp_l5x, ImportCollisionOptions[collision_option]
-                    )
-                    if inspect.isawaitable(_imp):
-                        await _imp
-                except Exception as exc:
-                    # C1: NO_CHANGES is checked FIRST (before engine-fault) — intentional order:
-                    # a benign no-op is mutually exclusive with a real engine fault (a faulted
-                    # server won't also emit the NO_CHANGES token), so checking it first keeps
-                    # the success path fast without masking real faults.
-                    # No restore, no invalidate, no write_count bump; session stays open.
-                    # NOTE: this check applies ONLY to the import call, not to _reopen().
-                    if IMPORT_NO_CHANGES_TOKEN in str(exc):
-                        return  # benign; outer finally removes tmp_l5x
-
-                    # Restore backup regardless of fault type.
+                # Engine-fault path: restart engine + reopen; raise with re-issue hint.
+                if is_engine_fault(exc) and self._engine_restart is not None:
                     try:
-                        restore_backup(backup, acd_path)
-                    except Exception:
-                        pass
-
-                    # Engine-fault path: restart engine + reopen; raise with re-issue hint.
-                    if is_engine_fault(exc) and self._engine_restart is not None:
-                        try:
-                            await self._recover_and_reopen()
-                        except Exception as restart_exc:
-                            await self._invalidate()
-                            raise SessionError(
-                                f"engine faulted and restart failed; session invalidated: {exc}"
-                            ) from exc
-                        raise SessionError(
-                            f"engine faulted and was restarted; project rolled back, "
-                            f"re-issue the operation: {exc}"
-                        ) from exc
-
-                    # C2: Real non-engine import failure — try to reopen so session remains
-                    # usable. Only invalidate if the reopen also fails.
-                    try:
-                        await self._reopen()
-                    except Exception as reopen_exc:
-                        log.warning(
-                            "reopen after import-failure rollback also failed: %s",
-                            reopen_exc,
-                            exc_info=True,
-                        )
+                        await self._recover_and_reopen()
+                    except Exception as restart_exc:
                         await self._invalidate()
-                    raise SessionError(
-                        f"import failed and was rolled back: {exc}"
-                    ) from exc
-
-                # Block 1b: SAVE — persist the in-memory import to the .ACD BEFORE the
-                # verifying reopen. partial_import_from_xml_file mutates the in-memory
-                # project only; without this save, _reopen() reloads the unchanged file
-                # and silently discards the import (the SDK reports applied=true while
-                # nothing reaches disk). Roll back to the pre-import backup on failure.
-                try:
-                    _save = self._project.save()
-                    if inspect.isawaitable(_save):
-                        await _save
-                except Exception as exc:
-                    try:
-                        restore_backup(backup, acd_path)
-                    except Exception:
-                        pass
-                    if is_engine_fault(exc) and self._engine_restart is not None:
-                        try:
-                            await self._recover_and_reopen()
-                        except Exception:
-                            await self._invalidate()
-                            raise SessionError(
-                                f"engine faulted during post-import save and restart "
-                                f"failed; session invalidated: {exc}"
-                            ) from exc
                         raise SessionError(
-                            f"engine faulted during post-import save; project rolled "
-                            f"back, re-issue the operation: {exc}"
+                            f"engine faulted and restart failed; session invalidated: {exc}"
                         ) from exc
-                    await self._invalidate()
                     raise SessionError(
-                        f"import succeeded but save failed and was rolled back: {exc}"
+                        f"engine faulted and was restarted; project rolled back, "
+                        f"re-issue the operation: {exc}"
                     ) from exc
 
-                # Block 2: REOPEN-TO-VERIFY — import saved to disk; verify by reopening.
-                # A failure here means the file was written but the SDK can't reopen it;
-                # we roll back to the pre-import backup.
+                # C2: Real non-engine import failure — try to reopen so session remains
+                # usable. Only invalidate if the reopen also fails.
                 try:
                     await self._reopen()
-                except Exception as exc:
-                    try:
-                        restore_backup(backup, acd_path)
-                    except Exception:
-                        pass
-                    if is_engine_fault(exc) and self._engine_restart is not None:
-                        try:
-                            await self._recover_and_reopen()
-                        except Exception:
-                            await self._invalidate()
-                            raise SessionError(
-                                f"engine faulted during reopen and restart failed; "
-                                f"session invalidated: {exc}"
-                            ) from exc
-                        raise SessionError(
-                            f"engine faulted during reopen/verify; project rolled back, "
-                            f"re-issue the operation: {exc}"
-                        ) from exc
+                except Exception as reopen_exc:
+                    log.warning(
+                        "reopen after import-failure rollback also failed: %s",
+                        reopen_exc,
+                        exc_info=True,
+                    )
                     await self._invalidate()
-                    raise SessionError(
-                        f"import succeeded but reopen/verify failed and was rolled back: {exc}"
-                    ) from exc
-            finally:
+                raise SessionError(
+                    f"import failed and was rolled back: {exc}"
+                ) from exc
+
+            # Block 1b: SAVE — persist the in-memory import to the .ACD BEFORE the
+            # verifying reopen. The SDK import mutates the in-memory project only;
+            # without this save, _reopen() reloads the unchanged file and silently
+            # discards the import (the SDK reports applied=true while nothing
+            # reaches disk). Roll back to the pre-import backup on failure.
+            try:
+                _save = self._project.save()
+                if inspect.isawaitable(_save):
+                    await _save
+            except Exception as exc:
                 try:
-                    os.remove(tmp_l5x)
-                except OSError:
+                    restore_backup(backup, acd_path)
+                except Exception:
                     pass
-            self._write_count += 1
+                if is_engine_fault(exc) and self._engine_restart is not None:
+                    try:
+                        await self._recover_and_reopen()
+                    except Exception:
+                        await self._invalidate()
+                        raise SessionError(
+                            f"engine faulted during post-import save and restart "
+                            f"failed; session invalidated: {exc}"
+                        ) from exc
+                    raise SessionError(
+                        f"engine faulted during post-import save; project rolled "
+                        f"back, re-issue the operation: {exc}"
+                    ) from exc
+                await self._invalidate()
+                raise SessionError(
+                    f"import succeeded but save failed and was rolled back: {exc}"
+                ) from exc
+
+            # Block 2: REOPEN-TO-VERIFY — import saved to disk; verify by reopening.
+            # A failure here means the file was written but the SDK can't reopen it;
+            # we roll back to the pre-import backup.
+            try:
+                await self._reopen()
+            except Exception as exc:
+                try:
+                    restore_backup(backup, acd_path)
+                except Exception:
+                    pass
+                if is_engine_fault(exc) and self._engine_restart is not None:
+                    try:
+                        await self._recover_and_reopen()
+                    except Exception:
+                        await self._invalidate()
+                        raise SessionError(
+                            f"engine faulted during reopen and restart failed; "
+                            f"session invalidated: {exc}"
+                        ) from exc
+                    raise SessionError(
+                        f"engine faulted during reopen/verify; project rolled back, "
+                        f"re-issue the operation: {exc}"
+                    ) from exc
+                await self._invalidate()
+                raise SessionError(
+                    f"import succeeded but reopen/verify failed and was rolled back: {exc}"
+                ) from exc
+        finally:
+            try:
+                os.remove(tmp_l5x)
+            except OSError:
+                pass
+        self._write_count += 1
 
     async def save(self, *, expected_project_path: "Path | None" = None) -> None:
         """Save the project with full backup-verify-operate-reopen-rollback."""
@@ -499,13 +519,29 @@ class ProjectSession:
                 f"unsupported data_type {data_type!r}; expected one of "
                 f"{sorted(_TAG_VALUE_TYPES)}"
             )
+        mode_upper = str(mode).upper()
+        if mode_upper not in ("OFFLINE", "ONLINE"):
+            raise SessionError(
+                f"invalid mode {mode!r}; expected OFFLINE or ONLINE"
+            )
+        # Real SDK signatures take an OperationMode enum; the stand-in accepts
+        # the raw string (lazy import keeps SDK-free test runs working).
+        try:
+            from logix_designer_sdk.enums import OperationMode
+
+            mode_arg = OperationMode[mode_upper]
+        except ImportError:
+            mode_arg = mode_upper
         async with self._lock:
             if self._project is None:
                 raise SessionError("no project is open")
 
             async def _do_get():
                 _getter = getattr(self._project, f"get_tag_value_{normalized}")
-                return await _getter(tag_xpath, mode=mode)
+                result = await _getter(tag_xpath, mode=mode_arg)
+                if isinstance(result, bytes):  # e.g. USINT returns raw bytes
+                    return int.from_bytes(result, "little")
+                return result
 
             return await self._with_fault_recovery(_do_get)
 

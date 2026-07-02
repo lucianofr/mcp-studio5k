@@ -118,6 +118,73 @@ def build_server(
     async def export_l5x(x_path: str) -> dict:
         return await inspect_mod.export_l5x(session, x_path, max_bytes=config.max_export_bytes)
 
+    # ---- v31 SDK read surface (comm/mode/safety/static) ---------------------
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def get_communications_path() -> dict:
+        """Return the open project's saved controller communications path."""
+        try:
+            path = await session.run_read_op("get_communications_path")
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"communications_path": path})
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def read_controller_mode() -> dict:
+        """Read the live controller mode (RUN/PROGRAM/TEST/FAULTED) via the comm path."""
+        try:
+            mode = await session.run_read_op("read_controller_mode")
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"mode": mode})
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def read_connected_state() -> dict:
+        """Read the connection state (UNKNOWN/OFFLINE/CONNECTED/ONLINE)."""
+        try:
+            state = await session.run_read_op("read_connected_state")
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"state": state})
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def is_safety_locked() -> dict:
+        """Report whether the open (safety) project is safety-locked."""
+        try:
+            locked = await session.run_read_op("is_safety_locked")
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"safety_locked": locked})
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def get_safety_network_number(module_name: str = "Local") -> dict:
+        """Return the safety network number (SNN) for a module ("Local" = controller)."""
+        try:
+            snn = await session.run_read_op("get_safety_network_number", module_name)
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"module": module_name, "safety_network_number": snn})
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def get_safety_signature() -> dict:
+        """Return the current safety signature of the open project."""
+        try:
+            signature = await session.run_read_op("get_safety_signature")
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"safety_signature": signature})
+
+    @mcp.tool(annotations=_READ_ONLY)
+    async def list_processor_types(major_revision: int) -> dict:
+        """List processor types available for a Logix major revision (no project needed)."""
+        try:
+            types = await session.list_processor_types(major_revision)
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope(
+            {"major_revision": major_revision, "processor_types": types}
+        )
+
     @mcp.tool(annotations={})
     async def open_project(path: str) -> dict:
         # Lifecycle, not a data write: available even read-only so a client can
@@ -292,6 +359,198 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
         except SessionError as exc:
             return err_envelope(str(exc))
         return ok_envelope({"saved_as": path})
+
+    # ---- v31 SDK write surface (project/comm/controller/tags) ---------------
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def create_project(
+        path: str, major_revision: int, processor_type_name: str, controller_name: str
+    ) -> dict:
+        """Create a new .ACD project (e.g. major_revision=31, "1769-L33ER")."""
+        try:
+            await session.create(
+                Path(path), major_revision, processor_type_name, controller_name
+            )
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        except Exception as exc:
+            return err_envelope(f"create failed: {exc}")
+        rate_limiter.reset()  # fresh project = fresh write budget, like open_project
+        return ok_envelope({"created": path, "controller_name": controller_name})
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def set_communications_path(comm_path: str) -> dict:
+        """Set the project's controller comm path (in memory — save_project to persist)."""
+        try:
+            await session.run_live_op("set_communications_path", comm_path)
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"communications_path": comm_path, "saved": False})
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def change_controller_type(processor_type_name: str) -> dict:
+        """Change the project's controller type (in memory — save_project to persist)."""
+        try:
+            await session.run_live_op("change_controller_type", processor_type_name)
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"processor_type_name": processor_type_name, "saved": False})
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def change_controller_mode(mode: str, confirmed: bool = False) -> dict:
+        """Change the LIVE controller mode (RUN/PROGRAM/TEST). Plant-affecting.
+
+        Requires confirmed=True — changing mode starts or stops the running
+        process logic. Controller key must be in REM.
+        """
+        if confirmed is not True:
+            return err_envelope(
+                "mode change refused: confirmed=True is required (plant-affecting)"
+            )
+        try:
+            applied = await session.change_controller_mode(mode)
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"mode": applied})
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def go_online() -> dict:
+        """Go online with the controller at the configured comm path."""
+        try:
+            await session.run_live_op("go_online")
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"online": True})
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def go_offline() -> dict:
+        """Go offline from the controller."""
+        try:
+            await session.run_live_op("go_offline")
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"online": False})
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def download_to_controller(confirmed: bool = False) -> dict:
+        """DOWNLOAD the open project to the controller — overwrites its program.
+
+        Requires confirmed=True. Controller must be in Program mode; the SDK
+        does not switch modes for you (use change_controller_mode first).
+        """
+        if confirmed is not True:
+            return err_envelope(
+                "download refused: confirmed=True is required (overwrites the "
+                "controller's program)"
+            )
+        try:
+            await session.run_live_op("download")
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"downloaded": True})
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def upload_from_controller(confirmed: bool = False) -> dict:
+        """Upload/merge the controller's project into the open .ACD (writes disk).
+
+        Requires confirmed=True. Full backup→upload→save→reopen→rollback.
+        """
+        if confirmed is not True:
+            return err_envelope("upload refused: confirmed=True is required")
+        try:
+            rate_limiter.check(now=time.monotonic())
+        except RateLimitError as exc:
+            return err_envelope(f"upload refused: {exc}")
+        try:
+            await session.upload_merge()
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope({"uploaded": True})
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def set_tag_value(
+        tag_xpath: str, data_type: str, value, mode: str = "OFFLINE",
+        confirmed: bool = False,
+    ) -> dict:
+        """Write a tag value. mode=OFFLINE edits the open project (save to persist);
+        mode=ONLINE writes the LIVE controller and requires confirmed=True.
+
+        data_type: BOOL/SINT/INT/DINT/LINT/USINT/UINT/UDINT/ULINT/STRING/REAL/LREAL.
+        Safety-excluded tags are refused.
+        """
+        if str(mode).upper() == "ONLINE" and confirmed is not True:
+            return err_envelope(
+                "online tag write refused: confirmed=True is required (live plant write)"
+            )
+        try:
+            applied = await session.set_tag_value(tag_xpath, data_type, value, mode=mode)
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope(
+            {"tag_xpath": tag_xpath, "value": applied, "mode": str(mode).upper()}
+        )
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def import_rungs_l5x(
+        l5x_content: str, x_path: str, insert_position: int = 0,
+        replace_count: int = 0, confirmed: bool = False,
+    ) -> dict:
+        """Import rungs into an existing routine at insert_position, replacing
+        replace_count existing rungs. Full backup/rollback semantics."""
+        return await la.import_rungs_l5x(
+            session, l5x_content, x_path,
+            insert_position=insert_position, replace_count=replace_count,
+            confirmed=confirmed,
+            exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
+            rate_limiter=rate_limiter,
+            max_bytes=config.max_export_bytes,
+            now=time.monotonic(),
+        )
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def import_with_target_l5x(
+        l5x_content: str, x_path: str, target_name: str, confirmed: bool = False,
+    ) -> dict:
+        """Import a single component, renaming it to target_name on import
+        (not valid for Trends/Modules)."""
+        return await la.import_with_target_l5x(
+            session, l5x_content, x_path, target_name,
+            confirmed=confirmed,
+            exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
+            rate_limiter=rate_limiter,
+            max_bytes=config.max_export_bytes,
+            now=time.monotonic(),
+        )
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def convert_project(path: str, destination_revision: int) -> dict:
+        """Upgrade a .ACD file's Logix revision in place (e.g. v30 → v31).
+
+        Only forward conversions to an installed revision. Refused while a
+        project is open; the file is backed up and restored on failure.
+        """
+        try:
+            rate_limiter.check(now=time.monotonic())
+        except RateLimitError as exc:
+            return err_envelope(f"convert refused: {exc}")
+        try:
+            result = await session.convert_project(Path(path), destination_revision)
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope(result)
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def upload_to_new_project(path: str, comm_path: str) -> dict:
+        """Upload the controller at comm_path into a NEW .ACD file under PROJECT_ROOT."""
+        try:
+            rate_limiter.check(now=time.monotonic())
+        except RateLimitError as exc:
+            return err_envelope(f"upload refused: {exc}")
+        try:
+            result = await session.upload_controller_to_new_project(Path(path), comm_path)
+        except SessionError as exc:
+            return err_envelope(str(exc))
+        return ok_envelope(result)
 
 
 def _register_resources(mcp, config, session) -> None:
