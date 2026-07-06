@@ -1,6 +1,5 @@
 # tests/test_bootstrap_port.py
 import os
-import socket
 import pytest
 from mcp_studio5k import bootstrap
 
@@ -23,14 +22,13 @@ def test_existing_apiport_honored_when_no_sdk_port(monkeypatch):
     assert bootstrap.resolve_engine_port() == 55002
 
 
-def test_auto_allocates_free_port_and_exports(monkeypatch):
+def test_default_is_shared_licensed_port_and_does_not_export(monkeypatch):
+    # With no override, we must NOT allocate a private port and must NOT export
+    # LDSDKService__APIPort: diverging from the shared licensed service is exactly
+    # what caused self-spawned, unlicensed engines and licensing errors on open.
     port = bootstrap.resolve_engine_port()
-    assert 1024 <= port <= 65535
-    assert os.environ[bootstrap.ENV_LDSDK_APIPORT] == str(port)
-    # The allocated port is actually free/bindable right after release.
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", port))
-    s.close()
+    assert port == bootstrap.DEFAULT_SHARED_PORT == 53204
+    assert bootstrap.ENV_LDSDK_APIPORT not in os.environ
 
 
 def test_invalid_explicit_port_rejected(monkeypatch):
