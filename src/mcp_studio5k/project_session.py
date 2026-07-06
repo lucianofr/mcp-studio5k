@@ -157,7 +157,12 @@ class ProjectSession(SdkOpsMixin):
             if self._project is not None:
                 raise SessionError("a project is already open; close it first")
             if self._engine_ensure is not None:
-                await self._engine_ensure()
+                try:
+                    await self._engine_ensure()
+                except Exception as exc:
+                    raise SessionError(
+                        f"engine could not be started: {exc}"
+                    ) from exc
             plock = ProjectLock(resolved, port=getattr(self._config, "sdk_port", 0))
             plock.acquire()
             try:
@@ -193,6 +198,25 @@ class ProjectSession(SdkOpsMixin):
                 self._lock_file.release()
                 self._lock_file = None
 
+    async def restart_engine_and_invalidate(self, restart) -> tuple[int, bool]:
+        """Restart the engine under the session lock and drop any open project.
+
+        Serializes against in-flight SDK operations (never kills the engine
+        mid-write) and clears the session's project handle, which is dead COM
+        after a real restart — the old handle is never close()d (it could fault).
+        Returns (new_pid, had_open_project).
+        """
+        async with self._lock:
+            had_project = self._project is not None
+            pid = await restart()
+            if had_project:
+                self._project = None
+                self._path = None
+                if self._lock_file is not None:
+                    self._lock_file.release()
+                    self._lock_file = None
+            return pid, had_project
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -209,6 +233,21 @@ class ProjectSession(SdkOpsMixin):
                 raise SessionError(
                     f"expected_project_path mismatch: {expected} != {self._path}"
                 )
+
+    def _try_restore(self, backup, acd_path) -> "str | None":
+        """Restore the backup over the .ACD; return error text on failure.
+
+        Never raises: rollback runs inside error paths. A non-None return means
+        the on-disk .ACD may still be in the failed state — callers MUST
+        invalidate the session and surface the restore error instead of
+        reporting a successful rollback.
+        """
+        try:
+            restore_backup(backup, acd_path)
+            return None
+        except Exception as exc:
+            log.error("rollback restore failed: %s", exc, exc_info=True)
+            return str(exc)
 
     async def _reopen(self) -> None:
         """Close and reopen the current project to validate the written state.
@@ -362,11 +401,17 @@ class ProjectSession(SdkOpsMixin):
                 if IMPORT_NO_CHANGES_TOKEN in str(exc):
                     return  # benign; outer finally removes tmp_l5x
 
-                # Restore backup regardless of fault type.
-                try:
-                    restore_backup(backup, acd_path)
-                except Exception:
-                    pass
+                # Restore backup regardless of fault type. A failed restore must
+                # never be reported as a successful rollback: invalidate and
+                # surface both errors so no corrupted session is handed out.
+                restore_err = self._try_restore(backup, acd_path)
+                if restore_err is not None:
+                    await self._invalidate()
+                    raise SessionError(
+                        f"import failed AND rollback restore failed ({restore_err}); "
+                        f"session invalidated — on-disk .ACD may be in the failed "
+                        f"state: {exc}"
+                    ) from exc
 
                 # Engine-fault path: restart engine + reopen; raise with re-issue hint.
                 if is_engine_fault(exc) and self._engine_restart is not None:
@@ -407,10 +452,14 @@ class ProjectSession(SdkOpsMixin):
                 if inspect.isawaitable(_save):
                     await _save
             except Exception as exc:
-                try:
-                    restore_backup(backup, acd_path)
-                except Exception:
-                    pass
+                restore_err = self._try_restore(backup, acd_path)
+                if restore_err is not None:
+                    await self._invalidate()
+                    raise SessionError(
+                        f"post-import save failed AND rollback restore failed "
+                        f"({restore_err}); session invalidated — on-disk .ACD may "
+                        f"be in the failed state: {exc}"
+                    ) from exc
                 if is_engine_fault(exc) and self._engine_restart is not None:
                     try:
                         await self._recover_and_reopen()
@@ -435,10 +484,14 @@ class ProjectSession(SdkOpsMixin):
             try:
                 await self._reopen()
             except Exception as exc:
-                try:
-                    restore_backup(backup, acd_path)
-                except Exception:
-                    pass
+                restore_err = self._try_restore(backup, acd_path)
+                if restore_err is not None:
+                    await self._invalidate()
+                    raise SessionError(
+                        f"reopen/verify failed AND rollback restore failed "
+                        f"({restore_err}); session invalidated — on-disk .ACD may "
+                        f"be in the failed state: {exc}"
+                    ) from exc
                 if is_engine_fault(exc) and self._engine_restart is not None:
                     try:
                         await self._recover_and_reopen()
@@ -482,10 +535,14 @@ class ProjectSession(SdkOpsMixin):
                 await self._project.save()
                 await self._reopen()
             except Exception as exc:
-                try:
-                    restore_backup(backup, acd_path)
-                except Exception:
-                    pass
+                restore_err = self._try_restore(backup, acd_path)
+                if restore_err is not None:
+                    await self._invalidate()
+                    raise SessionError(
+                        f"save failed AND rollback restore failed ({restore_err}); "
+                        f"session invalidated — on-disk .ACD may be in the failed "
+                        f"state: {exc}"
+                    ) from exc
                 if is_engine_fault(exc) and self._engine_restart is not None:
                     try:
                         await self._recover_and_reopen()
@@ -543,7 +600,14 @@ class ProjectSession(SdkOpsMixin):
                     return int.from_bytes(result, "little")
                 return result
 
-            return await self._with_fault_recovery(_do_get)
+            try:
+                return await self._with_fault_recovery(_do_get)
+            except SessionError:
+                raise
+            except Exception as exc:
+                # Wrap raw SDK errors (nonexistent tag, type mismatch) so the
+                # MCP boundary keeps its ok/err envelope contract.
+                raise SessionError(f"get_tag_value failed: {exc}") from exc
 
     async def partial_export(self, x_path: str) -> str:
         """Export an L5X subtree to a controlled temp file and return its text.
@@ -559,12 +623,23 @@ class ProjectSession(SdkOpsMixin):
                 suffix=".L5X", dir=str(self._config.backup_dir)
             )
             os.close(fd)
+            # The SDK's partial_export_to_xml_file refuses to overwrite an
+            # existing destination file ("Export does not overwrite existing
+            # files"), so free the reserved name before the SDK writes it.
+            os.remove(tmp)
             try:
                 async def _do_export():
                     await self._project.partial_export_to_xml_file(x_path, tmp)
                     return Path(tmp).read_text(encoding="utf-8")
 
-                return await self._with_fault_recovery(_do_export)
+                try:
+                    return await self._with_fault_recovery(_do_export)
+                except SessionError:
+                    raise
+                except Exception as exc:
+                    # Wrap raw SDK errors (bad x_path, missing element) so the
+                    # MCP boundary keeps its ok/err envelope contract.
+                    raise SessionError(f"partial_export failed: {exc}") from exc
             finally:
                 try:
                     os.remove(tmp)
@@ -606,10 +681,14 @@ class ProjectSession(SdkOpsMixin):
                 if inspect.isawaitable(_sa):
                     await _sa
             except Exception as exc:
-                try:
-                    restore_backup(backup, acd_path)
-                except Exception:
-                    pass
+                restore_err = self._try_restore(backup, acd_path)
+                if restore_err is not None:
+                    await self._invalidate()
+                    raise SessionError(
+                        f"save_as failed AND rollback restore failed "
+                        f"({restore_err}); session invalidated — on-disk .ACD may "
+                        f"be in the failed state: {exc}"
+                    ) from exc
                 if is_engine_fault(exc) and self._engine_restart is not None:
                     try:
                         await self._recover_and_reopen()

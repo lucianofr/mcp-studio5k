@@ -99,8 +99,13 @@ class WriteRateLimiter:
         self._last_write = None
 
     def check(self, *, now: float) -> None:
+        """Refuse when over budget or cooling down; does NOT consume the budget.
+
+        Callers must invoke record_write() only after the write actually
+        succeeds, so refused/failed/rolled-back operations do not burn the
+        per-session allowance or arm the cooldown.
+        """
         if self.in_cooldown(now=now):
             raise RateLimitError("write cooldown active; wait before next import")
         if self.needs_reconfirm():
             raise RateLimitError("write limit reached this session; re-confirm required")
-        self.record_write(now=now)

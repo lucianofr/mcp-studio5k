@@ -416,7 +416,17 @@ async def test_restart_engine_tool_calls_hook_and_returns_pid():
         restart_calls.append("restart")
         return 9999  # pid
 
-    mcp = build_server(_cfg(), AsyncMock(), engine_restart=_fake_restart)
+    sess = AsyncMock()
+
+    async def _restart_and_invalidate(restart):
+        # Mirror the real ProjectSession contract: run the hook, report whether
+        # an open project had to be invalidated (none here).
+        pid = await restart()
+        return pid, False
+
+    sess.restart_engine_and_invalidate = _restart_and_invalidate
+
+    mcp = build_server(_cfg(), sess, engine_restart=_fake_restart)
     async with Client(mcp) as client:
         result = await client.call_tool("restart_engine", {})
 
@@ -424,6 +434,8 @@ async def test_restart_engine_tool_calls_hook_and_returns_pid():
     data = json.loads(text)
     assert data.get("ok") is True
     assert data["data"]["restarted_pid"] == 9999
+    assert data["data"]["session_invalidated"] is False
+    assert data["data"]["reopen_required"] is False
     assert len(restart_calls) == 1
 
 

@@ -96,35 +96,41 @@ def test_in_cooldown_true_within_window_false_after():
     assert limiter.in_cooldown(now=131.0) is False
 
 
-def test_check_records_write_when_clear():
+def test_check_does_not_consume_budget():
+    # check() only validates; budget is consumed by an explicit record_write.
     limiter = WriteRateLimiter(limit=3, cooldown_seconds=10.0)
     limiter.check(now=100.0)
-    assert limiter.count == 1
+    limiter.check(now=100.0)
+    assert limiter.count == 0
 
 
 def test_check_raises_when_in_cooldown():
     limiter = WriteRateLimiter(limit=3, cooldown_seconds=10.0)
     limiter.check(now=100.0)
+    limiter.record_write(now=100.0)
     with pytest.raises(RateLimitError, match="cooldown"):
         limiter.check(now=105.0)
 
 
 def test_check_raises_when_limit_reached():
     limiter = WriteRateLimiter(limit=2, cooldown_seconds=0.0)
-    limiter.check(now=1.0)
-    limiter.check(now=2.0)
+    for t in (1.0, 2.0):
+        limiter.check(now=t)
+        limiter.record_write(now=t)
     with pytest.raises(RateLimitError, match="limit"):
         limiter.check(now=3.0)
 
 
 def test_reset_clears_budget_after_limit_reached():
     limiter = WriteRateLimiter(limit=2, cooldown_seconds=0.0)
-    limiter.check(now=1.0)
-    limiter.check(now=2.0)
+    for t in (1.0, 2.0):
+        limiter.check(now=t)
+        limiter.record_write(now=t)
     limiter.reset()
     assert limiter.count == 0
     # Fresh budget after reset: two more writes allowed, third refused again.
-    limiter.check(now=3.0)
-    limiter.check(now=4.0)
+    for t in (3.0, 4.0):
+        limiter.check(now=t)
+        limiter.record_write(now=t)
     with pytest.raises(RateLimitError, match="limit"):
         limiter.check(now=5.0)
