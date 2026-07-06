@@ -26,7 +26,7 @@ import os
 import sys
 from pathlib import Path
 
-from .bootstrap import reallocate_engine_port, resolve_engine_port
+from .bootstrap import resolve_engine_port
 from .config import load_config
 from .project_session import ProjectSession
 from .server import build_server
@@ -84,7 +84,6 @@ async def _amain() -> None:
     engine = None
     engine_restart = None
     engine_ensure = None
-    explicit_port = bool(os.environ.get("MCP_S5K_SDK_PORT", "").strip())
     if sdk_cls is not _MissingSdkProject:
         try:
             from .sdk_discovery import discover_sdk
@@ -94,8 +93,12 @@ async def _amain() -> None:
             engine = EngineManager(
                 sdk_info,
                 engine_port,
-                # Auto-mode reallocates on collision; an explicit fixed port does not.
-                allocate_port=None if explicit_port else reallocate_engine_port,
+                # Never reallocate to a private port: the engine we must reach is
+                # the shared licensed service on its fixed port. Reallocating to a
+                # random port would strand it and force a rogue, unlicensed spawn
+                # (the exact regression that broke project-open). If the fixed port
+                # is genuinely blocked, fail loud so the operator fixes it.
+                allocate_port=None,
             )
             engine_restart = engine.restart
             engine_ensure = engine.ensure

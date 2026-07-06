@@ -1,9 +1,20 @@
-"""Resolve the per-process SDK engine port and export it BEFORE the SDK loads.
+"""Resolve which SDK engine port this process talks to, BEFORE the SDK loads.
 
-The Rockwell engine and its in-process client both read the port from env
-`LDSDKService__APIPort` (the `--port` CLI flag is a no-op). Setting this env
-before `logix_designer_sdk` is imported is what isolates one process's engine
-from another's.
+By DEFAULT the MCP connects to the shared, licensed *Logix Designer SDK Windows
+Service* on its configured port (53204 / appsettings.json `APIPort`) — the one
+engine that holds the FactoryTalk activation. We deliberately do NOT allocate a
+private per-process port here: a private port has no licensed engine listening,
+so `EngineManager` would spawn its own `LdSdkServer.exe`, and a self-spawned
+engine runs OUTSIDE the licensed service context and fails project-open with a
+licensing error. (The SDK also only supports ONE V31 project open at a time
+across ALL applications, so a private engine per process cannot buy real
+parallelism on v31 anyway.)
+
+Only an explicit `MCP_S5K_SDK_PORT` (or a pre-set `LDSDKService__APIPort`)
+overrides the shared port. The Rockwell engine and its in-process client read
+the port from env `LDSDKService__APIPort` (the `--port` CLI flag is a no-op), so
+we export that env ONLY when the operator explicitly overrides — otherwise we
+leave it unset and let the SDK read its own appsettings.json.
 """
 from __future__ import annotations
 
@@ -12,6 +23,9 @@ import socket
 
 ENV_SDK_PORT = "MCP_S5K_SDK_PORT"
 ENV_LDSDK_APIPORT = "LDSDKService__APIPort"
+
+# Default port of the shared, licensed Logix Designer SDK Windows service.
+DEFAULT_SHARED_PORT = 53204
 
 _MIN_PORT = 1024
 _MAX_PORT = 65535
@@ -45,10 +59,16 @@ def _export(port: int) -> int:
 
 
 def resolve_engine_port() -> int:
-    """Choose this process's engine port and export LDSDKService__APIPort.
+    """Resolve the engine port this process talks to.
 
-    Precedence: MCP_S5K_SDK_PORT (explicit) > existing LDSDKService__APIPort
-    (operator-set) > auto-allocated free port.
+    Precedence: MCP_S5K_SDK_PORT (explicit override, exported) > existing
+    LDSDKService__APIPort (operator/appsettings-set, respected as-is) >
+    DEFAULT_SHARED_PORT (the shared licensed service; NOT exported, so the SDK
+    reads its own appsettings.json).
+
+    Only an explicit override exports LDSDKService__APIPort. The default path
+    never diverges from the shared licensed engine, which is what keeps
+    project-open licensed.
     """
     explicit = os.environ.get(ENV_SDK_PORT)
     if explicit and explicit.strip():
@@ -56,9 +76,10 @@ def resolve_engine_port() -> int:
 
     existing = os.environ.get(ENV_LDSDK_APIPORT)
     if existing and existing.strip():
-        return _export(_validate_port(existing))
+        # Already set by the operator/appsettings; respect it without re-export.
+        return _validate_port(existing)
 
-    return _export(allocate_free_port())
+    return DEFAULT_SHARED_PORT
 
 
 def reallocate_engine_port() -> int:
