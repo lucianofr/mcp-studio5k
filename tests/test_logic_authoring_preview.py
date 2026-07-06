@@ -26,11 +26,17 @@ def test_make_change_token_is_deterministic_and_xpath_sensitive():
 
 
 def test_make_change_token_matches_documented_formula():
-    content, x_path, salt = "<R/>", "P/R", "pepper"
+    content, x_path, salt, context = "<R/>", "P/R", "pepper", "ctx"
     expected = hashlib.sha256(
         content.encode() + b"\x00" + x_path.encode() + b"\x00" + salt.encode()
+        + b"\x00" + context.encode()
     ).hexdigest()
-    assert make_change_token(content, x_path, salt=salt) == expected
+    assert make_change_token(content, x_path, salt=salt, context=context) == expected
+    # Default context is the empty string.
+    default_expected = hashlib.sha256(
+        content.encode() + b"\x00" + x_path.encode() + b"\x00" + salt.encode() + b"\x00"
+    ).hexdigest()
+    assert make_change_token(content, x_path, salt=salt) == default_expected
 
 
 # ---------------------------------------------------------------------------
@@ -78,8 +84,11 @@ async def test_preview_import_valid_returns_diff_token_and_missing_tags(monkeypa
     monkeypatch.setattr(
         la, "_referenced_operands", lambda content: ["Tank_Level", "Ghost_Tag", "Phantom"]
     )
+    from unittest.mock import MagicMock
+
     session = AsyncMock()
     session.partial_export = AsyncMock(return_value="<RSLogix5000Content/>")
+    session.status = MagicMock(return_value={"path": "C:/Proj.acd"})
 
     async def _existing(_session):
         return {"Tank_Level"}
@@ -91,7 +100,10 @@ async def test_preview_import_valid_returns_diff_token_and_missing_tags(monkeypa
     assert result["ok"] is True
     assert result["data"]["diff"]["routine_type"] == "ST"
     assert sorted(result["data"]["referenced_tags_not_in_project"]) == ["Ghost_Tag", "Phantom"]
-    assert result["data"]["change_token"] == make_change_token(content, "P/R", salt="pepper")
+    current = la.strip_comments("<RSLogix5000Content/>", max_bytes=1_000_000)
+    assert result["data"]["change_token"] == make_change_token(
+        content, "P/R", salt="pepper", context=la._token_context(session, current)
+    )
 
 
 # ---------------------------------------------------------------------------

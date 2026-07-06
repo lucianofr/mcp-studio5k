@@ -218,9 +218,18 @@ class EngineManager:
     async def restart(self) -> int:
         async with self._op_lock:
             existing = _find_running_pid(self._port)
-            if existing is not None and (
-                self._did_spawn or _proc_owns(self._proc, existing)
-            ):
+            if existing is not None:
+                owned = self._did_spawn or _proc_owns(self._proc, existing)
+                if not owned:
+                    # Adopted shared service: silently re-adopting the same
+                    # (possibly faulted) PID would report a successful restart
+                    # while doing nothing. Fail loud with the manual remedy.
+                    raise SdkRuntimeError(
+                        f"engine on port {self._port} (pid {existing}) was adopted, "
+                        "not spawned by this process; cannot restart it in-band — "
+                        "restart the 'Logix Designer SDK Service' Windows service "
+                        "(LdSdkService) manually"
+                    )
                 await _terminate_pid(existing)
             await self._terminate_proc()
             self._proc = None

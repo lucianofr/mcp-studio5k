@@ -118,6 +118,20 @@ def build_server(
     async def export_l5x(x_path: str) -> dict:
         return await inspect_mod.export_l5x(session, x_path, max_bytes=config.max_export_bytes)
 
+    @mcp.tool(annotations={"readOnlyHint": True})
+    async def validate_l5x(l5x_content: str) -> dict:
+        result = _validate_l5x(l5x_content, max_bytes=config.max_l5x_bytes)
+        if result.ok:
+            return ok_envelope({"valid": True})
+        return err_envelope("; ".join(str(i) for i in result.issues))
+
+    @mcp.tool(annotations={"readOnlyHint": True})
+    async def preview_import(l5x_content: str, x_path: str) -> dict:
+        return await la.preview_import(
+            session, l5x_content, x_path,
+            max_bytes=config.max_l5x_bytes, salt=config.change_token_salt,
+        )
+
     # ---- v31 SDK read surface (comm/mode/safety/static) ---------------------
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -241,10 +255,18 @@ def build_server(
         if engine_restart is None:
             return err_envelope("engine restart not available")
         try:
-            pid = await engine_restart()
-            return ok_envelope({"restarted_pid": pid})
+            pid, invalidated = await session.restart_engine_and_invalidate(
+                engine_restart
+            )
         except Exception as exc:
             return err_envelope(f"engine restart failed: {exc}")
+        return ok_envelope(
+            {
+                "restarted_pid": pid,
+                "session_invalidated": invalidated,
+                "reopen_required": invalidated,
+            }
+        )
 
     if config.read_only is False:
         _register_write_tools(mcp, config, session, rate_limiter)
@@ -255,20 +277,6 @@ def build_server(
 
 
 def _register_write_tools(mcp, config, session, rate_limiter) -> None:
-    @mcp.tool(annotations={"readOnlyHint": True})
-    async def validate_l5x(l5x_content: str) -> dict:
-        result = _validate_l5x(l5x_content, max_bytes=config.max_export_bytes)
-        if result.ok:
-            return ok_envelope({"valid": True})
-        return err_envelope("; ".join(str(i) for i in result.issues))
-
-    @mcp.tool(annotations={"readOnlyHint": True})
-    async def preview_import(l5x_content: str, x_path: str) -> dict:
-        return await la.preview_import(
-            session, l5x_content, x_path,
-            max_bytes=config.max_export_bytes, salt=config.change_token_salt,
-        )
-
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def import_l5x(
         l5x_content: str, x_path: str, collision_option: str = "CANCEL_ON_COLL",
@@ -281,7 +289,7 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
             change_token=change_token, expected_change_token=expected_change_token,
             exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
             rate_limiter=rate_limiter,
-            max_bytes=config.max_export_bytes, salt=config.change_token_salt,
+            max_bytes=config.max_l5x_bytes, salt=config.change_token_salt,
             now=time.monotonic(),
         )
 
@@ -295,7 +303,7 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
             collision_option=collision_option, confirmed=confirmed,
             exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
             rate_limiter=rate_limiter,
-            max_bytes=config.max_export_bytes,
+            max_bytes=config.max_l5x_bytes,
             now=time.monotonic(),
         )
 
@@ -310,7 +318,7 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
             collision_option=collision_option, confirmed=confirmed,
             exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
             rate_limiter=rate_limiter,
-            max_bytes=config.max_export_bytes,
+            max_bytes=config.max_l5x_bytes,
             now=time.monotonic(),
         )
 
@@ -328,7 +336,7 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
             collision_option=collision_option, confirmed=confirmed,
             exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
             rate_limiter=rate_limiter,
-            max_bytes=config.max_export_bytes,
+            max_bytes=config.max_l5x_bytes,
             now=time.monotonic(),
         )
 
@@ -336,28 +344,32 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
     async def save_project() -> dict:
         # Persisting to disk is a write: subject it to the same cooldown as imports
         # and surface session failures as refusal envelopes, never raw exceptions.
+        now_val = time.monotonic()
         try:
-            rate_limiter.check(now=time.monotonic())
+            rate_limiter.check(now=now_val)
         except RateLimitError as exc:
             return err_envelope(f"save refused: {exc}")
         try:
             await session.save()
         except SessionError as exc:
             return err_envelope(str(exc))
+        rate_limiter.record_write(now=now_val)
         return ok_envelope({"saved": True})
 
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def save_project_as(path: str, overwrite: bool = False) -> dict:
-        if not overwrite:
-            return err_envelope("refuse to overwrite without overwrite=True")
+        # session.save_as refuses an EXISTING target unless overwrite=True — pass
+        # the caller's intent through instead of gating every call here.
+        now_val = time.monotonic()
         try:
-            rate_limiter.check(now=time.monotonic())
+            rate_limiter.check(now=now_val)
         except RateLimitError as exc:
             return err_envelope(f"save refused: {exc}")
         try:
             await session.save_as(path, overwrite=overwrite)
         except SessionError as exc:
             return err_envelope(str(exc))
+        rate_limiter.record_write(now=now_val)
         return ok_envelope({"saved_as": path})
 
     # ---- v31 SDK write surface (project/comm/controller/tags) ---------------
@@ -457,14 +469,16 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
         """
         if confirmed is not True:
             return err_envelope("upload refused: confirmed=True is required")
+        now_val = time.monotonic()
         try:
-            rate_limiter.check(now=time.monotonic())
+            rate_limiter.check(now=now_val)
         except RateLimitError as exc:
             return err_envelope(f"upload refused: {exc}")
         try:
             await session.upload_merge()
         except SessionError as exc:
             return err_envelope(str(exc))
+        rate_limiter.record_write(now=now_val)
         return ok_envelope({"uploaded": True})
 
     @mcp.tool(annotations=_DESTRUCTIVE)
@@ -503,7 +517,7 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
             confirmed=confirmed,
             exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
             rate_limiter=rate_limiter,
-            max_bytes=config.max_export_bytes,
+            max_bytes=config.max_l5x_bytes,
             now=time.monotonic(),
         )
 
@@ -518,7 +532,7 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
             confirmed=confirmed,
             exclusions=getattr(config, "safety_tag_exclusions", frozenset()),
             rate_limiter=rate_limiter,
-            max_bytes=config.max_export_bytes,
+            max_bytes=config.max_l5x_bytes,
             now=time.monotonic(),
         )
 
@@ -529,27 +543,31 @@ def _register_write_tools(mcp, config, session, rate_limiter) -> None:
         Only forward conversions to an installed revision. Refused while a
         project is open; the file is backed up and restored on failure.
         """
+        now_val = time.monotonic()
         try:
-            rate_limiter.check(now=time.monotonic())
+            rate_limiter.check(now=now_val)
         except RateLimitError as exc:
             return err_envelope(f"convert refused: {exc}")
         try:
             result = await session.convert_project(Path(path), destination_revision)
         except SessionError as exc:
             return err_envelope(str(exc))
+        rate_limiter.record_write(now=now_val)
         return ok_envelope(result)
 
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def upload_to_new_project(path: str, comm_path: str) -> dict:
         """Upload the controller at comm_path into a NEW .ACD file under PROJECT_ROOT."""
+        now_val = time.monotonic()
         try:
-            rate_limiter.check(now=time.monotonic())
+            rate_limiter.check(now=now_val)
         except RateLimitError as exc:
             return err_envelope(f"upload refused: {exc}")
         try:
             result = await session.upload_controller_to_new_project(Path(path), comm_path)
         except SessionError as exc:
             return err_envelope(str(exc))
+        rate_limiter.record_write(now=now_val)
         return ok_envelope(result)
 
 

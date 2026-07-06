@@ -5,22 +5,50 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import mcp_studio5k.logic_authoring as la_mod
+from mcp_studio5k.inspect import strip_comments
 from mcp_studio5k.logic_authoring import import_l5x, make_change_token
 
 CONTENT = "<Routine Type='ST'/>"
 XPATH = "Controller/Programs/Program[@Name='P']/Routines/Routine[@Name='R']"
-TOKEN = make_change_token(CONTENT, XPATH, salt="s")
+
+# What the stub session's partial_export returns for the current routine state.
+CURRENT_L5X = (
+    '<?xml version="1.0"?>'
+    '<RSLogix5000Content SchemaRevision="1.0"><Controller/></RSLogix5000Content>'
+)
+PROJECT_PATH = "C:/Proj.acd"
+
+
+class _StatusStub:
+    def status(self):
+        return {"path": PROJECT_PATH}
+
+
+def _token(content: str, x_path: str = XPATH, salt: str = "s") -> str:
+    """Replicate import_l5x's recompute pipeline to mint a VALID token."""
+    current = strip_comments(CURRENT_L5X)
+    return make_change_token(
+        content, x_path, salt=salt,
+        context=la_mod._token_context(_StatusStub(), current),
+    )
+
+
+TOKEN = _token(CONTENT)
 
 
 def _session():
     s = AsyncMock()
     s.apply_l5x_import = AsyncMock(return_value=None)
+    s.partial_export = AsyncMock(return_value=CURRENT_L5X)
+    s.status = MagicMock(return_value={"path": PROJECT_PATH})
     return s
 
 
 def _limiter():
     lim = MagicMock()
     lim.check = MagicMock(return_value=None)  # no raise = allowed
+    lim.record_write = MagicMock(return_value=None)
     return lim
 
 
@@ -45,6 +73,22 @@ async def test_import_refuses_when_not_confirmed():
 # ---------------------------------------------------------------------------
 # Cycle 2 — refuse on missing/mismatched token and bad collision_option
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_import_refuses_when_current_state_export_fails():
+    from mcp_studio5k.project_session import SessionError
+
+    session = _session()
+    session.partial_export = AsyncMock(side_effect=SessionError("no project is open"))
+    result = await import_l5x(
+        session, CONTENT, XPATH, confirmed=True, change_token=TOKEN,
+        expected_change_token=TOKEN, exclusions=frozenset(), rate_limiter=_limiter(),
+        max_bytes=1_000_000, salt="s",
+    )
+    assert result["ok"] is False
+    assert "cannot export current state" in result["error"]
+    session.apply_l5x_import.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -97,7 +141,7 @@ async def test_import_refuses_oversized_content(monkeypatch):
 
     monkeypatch.setattr(la, "check_safety_exclusions", lambda content, excl, **kw: ())
     big = "<Routine>" + ("x" * 2000) + "</Routine>"
-    token = make_change_token(big, XPATH, salt="s")
+    token = _token(big)
     session = _session()
     result = await import_l5x(
         session, big, XPATH, confirmed=True, change_token=token,
@@ -142,6 +186,7 @@ async def test_import_refuses_when_rate_limited(monkeypatch):
     assert result["ok"] is False
     assert "cooldown" in result["error"].lower()
     session.apply_l5x_import.assert_not_awaited()
+    limiter.record_write.assert_not_called()  # refusal must not burn budget
 
 
 @pytest.mark.asyncio
@@ -158,6 +203,7 @@ async def test_import_happy_path_applies_once(monkeypatch):
     )
     assert result["ok"] is True
     limiter.check.assert_called_once_with(now=5.0)
+    limiter.record_write.assert_called_once_with(now=5.0)  # budget burned only on success
     session.apply_l5x_import.assert_awaited_once_with(CONTENT, XPATH, "DISCARD_ON_COLL")
 
 
@@ -171,7 +217,7 @@ async def test_import_refuses_doctype_payload_without_raising():
     # A DOCTYPE-bearing payload makes the real check_safety_exclusions raise
     # SafetyError; Guard 5 must convert that to a refusal envelope, never leak it.
     doctype = "<!DOCTYPE x><Routine Type='ST'/>"
-    token = make_change_token(doctype, XPATH, salt="s")
+    token = _token(doctype)
     session = _session()
     result = await import_l5x(
         session, doctype, XPATH, confirmed=True, change_token=token,

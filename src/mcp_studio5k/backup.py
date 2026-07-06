@@ -48,6 +48,12 @@ def make_verified_backup(acd_path: Path, backup_dir: Path, *, rotation: int) -> 
 
     shutil.copy2(acd_path, dest)
 
+    # copy2 preserves the SOURCE mtime; after a restore the source can carry an
+    # older mtime than existing backups, which would make mtime-based rotation
+    # classify this brand-new backup as the stalest and delete it. Stamp the
+    # backup with the current time so rotation ordering matches creation order.
+    os.utime(dest)
+
     if dest.stat().st_size != source_size:
         dest.unlink(missing_ok=True)
         raise BackupError(
@@ -55,17 +61,23 @@ def make_verified_backup(acd_path: Path, backup_dir: Path, *, rotation: int) -> 
             f"backup={dest.stat().st_size if dest.exists() else 'missing'}"
         )
 
-    _enforce_rotation(backup_dir, acd_path.stem, rotation)
+    _enforce_rotation(backup_dir, acd_path.stem, rotation, keep=dest)
     return dest
 
 
-def _enforce_rotation(backup_dir: Path, stem: str, rotation: int) -> None:
+def _enforce_rotation(
+    backup_dir: Path, stem: str, rotation: int, *, keep: "Path | None" = None
+) -> None:
     backups = sorted(
         backup_dir.glob(f"{stem}.*.acd"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
     for stale in backups[rotation:]:
+        # Never delete the backup the caller just created: its path is the live
+        # rollback target of an in-flight mutation.
+        if keep is not None and stale == keep:
+            continue
         stale.unlink(missing_ok=True)
 
 

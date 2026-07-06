@@ -9,7 +9,8 @@ from mcp_studio5k.server import build_server
 
 def _config(read_only: bool):
     return SimpleNamespace(
-        read_only=read_only, max_export_bytes=1_000_000, change_token_salt="s",
+        read_only=read_only, max_export_bytes=1_000_000, max_l5x_bytes=1_000_000,
+        change_token_salt="s",
         safety_tag_exclusions=frozenset(), write_limit_per_session=5, cooldown_seconds=10.0,
     )
 
@@ -26,7 +27,10 @@ async def test_read_only_hides_write_tools():
     assert "list_programs" in names
     assert "get_tag_value" in names
     assert "export_l5x" in names
-    for write_tool in ("import_l5x", "preview_import", "validate_l5x", "save_project", "save_project_as"):
+    # validate_l5x and preview_import are read-only analysis tools: always registered.
+    assert "validate_l5x" in names
+    assert "preview_import" in names
+    for write_tool in ("import_l5x", "save_project", "save_project_as"):
         assert write_tool not in names
 
 
@@ -126,12 +130,31 @@ async def test_save_project_tool():
 
 
 @pytest.mark.asyncio
-async def test_save_project_as_no_overwrite():
-    mcp = build_server(_config(read_only=False), _session())
+async def test_save_project_as_no_overwrite_new_target_saves():
+    # overwrite=False on a NON-existing target is fine: the tool delegates the
+    # caller's intent to session.save_as(path, overwrite=False).
+    sess = _session()
+    mcp = build_server(_config(read_only=False), sess)
     async with Client(mcp) as client:
         result = await client.call_tool("save_project_as", {"path": "/tmp/x.ACD", "overwrite": False})
     text = result.content[0].text if hasattr(result, "content") else str(result)
-    assert "refuse" in text.lower() or "overwrite" in text.lower()
+    assert "saved_as" in text or "x.ACD" in text
+    sess.save_as.assert_awaited_once_with("/tmp/x.ACD", overwrite=False)
+
+
+@pytest.mark.asyncio
+async def test_save_project_as_existing_target_refused_by_session():
+    # Refusing an EXISTING target without overwrite=True is session.save_as's job;
+    # the tool surfaces the SessionError as an err envelope.
+    from mcp_studio5k.project_session import SessionError
+
+    sess = _session()
+    sess.save_as.side_effect = SessionError("refuse to overwrite existing file: /tmp/x.ACD")
+    mcp = build_server(_config(read_only=False), sess)
+    async with Client(mcp) as client:
+        result = await client.call_tool("save_project_as", {"path": "/tmp/x.ACD", "overwrite": False})
+    text = result.content[0].text if hasattr(result, "content") else str(result)
+    assert "refuse" in text.lower() and "overwrite" in text.lower()
 
 
 @pytest.mark.asyncio
@@ -200,10 +223,12 @@ async def test_preview_import_tool_exercises_referenced_operands():
         "</Routine></Routines></Program></Programs></Controller>"
         "</RSLogix5000Content>"
     )
+    from unittest.mock import MagicMock
+
     sess = _session()
     sess.partial_export = AM(return_value="<old/>")
-    # Return one page of tags then done
-    page1 = {"ok": True, "data": [{"name": "MyTag"}], "meta": {"page": None}}
+    # status() is synchronous in the real session; the token context reads it.
+    sess.status = MagicMock(return_value={"path": None})
     with patch.object(la_mod, "_project_tag_names", new=AM(return_value={"MyTag"})):
         mcp = build_server(_config(read_only=False), sess)
         async with Client(mcp) as client:
@@ -220,7 +245,8 @@ async def test_import_l5x_empty_salt_returns_error():
     from types import SimpleNamespace
 
     cfg = SimpleNamespace(
-        read_only=False, max_export_bytes=1_000_000, change_token_salt="",
+        read_only=False, max_export_bytes=1_000_000, max_l5x_bytes=1_000_000,
+        change_token_salt="",
         safety_tag_exclusions=frozenset(), write_limit_per_session=5, cooldown_seconds=10.0,
     )
     mcp = build_server(cfg, _session())

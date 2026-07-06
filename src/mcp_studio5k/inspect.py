@@ -94,7 +94,7 @@ async def list_programs(
             if el.get("Name")
         ]
         window, next_cursor, total = _paginate(programs, page_size, cursor)
-    except (ValueError, L5xParseError) as exc:
+    except (ValueError, L5xParseError, SessionError) as exc:
         return err_envelope(str(exc))
     return ok_envelope(
         window,
@@ -122,7 +122,7 @@ async def list_routines(
             if el.get("Name")
         ]
         window, next_cursor, total = _paginate(routines, page_size, cursor)
-    except (ValueError, L5xParseError) as exc:
+    except (ValueError, L5xParseError, SessionError) as exc:
         return err_envelope(str(exc))
     return ok_envelope(
         window,
@@ -188,7 +188,7 @@ async def list_tags(
             if _tag_matches(el, needle, datatype_needle)
         ]
         window, next_cursor, total = _paginate(tags, page_size, cursor)
-    except (ValueError, L5xParseError) as exc:
+    except (ValueError, L5xParseError, SessionError) as exc:
         return err_envelope(str(exc))
     return ok_envelope(
         window,
@@ -241,8 +241,14 @@ async def export_l5x(session, x_path: str, *, max_bytes: int) -> dict:
     ``None`` and a ``resource_uri`` is returned so callers can fetch on demand.
     """
     try:
-        stripped = strip_comments(await session.partial_export(x_path))
-    except (ValueError, L5xParseError) as exc:
+        raw = await session.partial_export(x_path)
+        # The payload comes from the local SDK export (trusted), so parse with a
+        # cap that admits the actual content: an over-``max_bytes`` export must
+        # reach the resource_uri hint below, not fail the parse.
+        stripped = strip_comments(
+            raw, max_bytes=max(max_bytes, len(raw.encode("utf-8")) + 1)
+        )
+    except (ValueError, L5xParseError, SessionError) as exc:
         return err_envelope(str(exc))
     size_bytes = len(stripped.encode("utf-8"))
     if size_bytes > max_bytes:
@@ -310,7 +316,7 @@ async def get_udt_definition(
             for m in dt.findall(".//Members/Member")
             if m.get("Name")
         ]
-    except (ValueError, L5xParseError) as exc:
+    except (ValueError, L5xParseError, SessionError) as exc:
         return err_envelope(str(exc))
     return ok_envelope(
         {
@@ -359,7 +365,7 @@ async def get_aoi_signature(
             }
             parameters.append(param)
             grouped[_AOI_USAGE_GROUPS.get(usage or "", "other")].append(param)
-    except (ValueError, L5xParseError) as exc:
+    except (ValueError, L5xParseError, SessionError) as exc:
         return err_envelope(str(exc))
     return ok_envelope(
         {
@@ -403,7 +409,7 @@ async def list_programs_routines(
                 if r.get("Name")
             ]
             programs.append({"program": prog.get("Name"), "routines": routines})
-    except (ValueError, L5xParseError) as exc:
+    except (ValueError, L5xParseError, SessionError) as exc:
         return err_envelope(str(exc))
     return ok_envelope(programs, meta=Meta(total=len(programs)))
 
@@ -454,6 +460,6 @@ async def get_module_config(
                     "ports": ports,
                 }
             )
-    except (ValueError, L5xParseError) as exc:
+    except (ValueError, L5xParseError, SessionError) as exc:
         return err_envelope(str(exc))
     return ok_envelope(modules, meta=Meta(total=len(modules)))

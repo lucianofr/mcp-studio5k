@@ -28,10 +28,32 @@ def _parse_failure(message: str) -> ValidationResult:
     )
 
 
+# Non-routine payloads the import tools accept (import_tag_l5x,
+# import_component_l5x, import_rungs_l5x). They have no dialect validator; the
+# hardened parse (size cap, DOCTYPE/entity rejection, well-formedness) is the
+# whole check for them.
+_NON_ROUTINE_TARGET_TYPES = frozenset(
+    {"Tag", "Tags", "DataType", "AddOnInstructionDefinition", "Module", "Rung", "Rungs"}
+)
+
+
 def validate_l5x(content: str, *, max_bytes: int = DEFAULT_MAX_L5X_BYTES) -> ValidationResult:
     """Parse hardened L5X and validate via the dialect-specific validator."""
     try:
         root = parse_l5x(content, max_bytes=max_bytes)
+    except L5xParseError as exc:
+        return _parse_failure(str(exc))
+
+    routine_el = root.find(".//Routine")
+    if routine_el is None:
+        # Tag/UDT/AOI/module/rung payloads are valid imports without a
+        # <Routine>; accept them after the hardened parse instead of failing
+        # the documented validate-before-import workflow.
+        if root.get("TargetType") in _NON_ROUTINE_TARGET_TYPES:
+            return ValidationResult(ok=True, issues=())
+        return _parse_failure("no <Routine> element found")
+
+    try:
         kind = routine_type(root)
     except L5xParseError as exc:
         return _parse_failure(str(exc))
@@ -40,6 +62,5 @@ def validate_l5x(content: str, *, max_bytes: int = DEFAULT_MAX_L5X_BYTES) -> Val
     if validator is None:
         return _parse_failure(f"unsupported routine Type: {kind!r}")
 
-    routine_el = root.find(".//Routine")
     issues = validator(routine_el)
     return ValidationResult(ok=not issues, issues=tuple(issues))

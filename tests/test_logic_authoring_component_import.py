@@ -25,9 +25,14 @@ ROUTINE_L5X = AOI_L5X.replace(
 class FakeRateLimiter:
     def __init__(self) -> None:
         self.calls = 0
+        self.recorded = 0
 
     def check(self, now=None) -> None:
         self.calls += 1
+
+    def record_write(self, now=None) -> None:
+        # Budget is consumed only after a successful write.
+        self.recorded += 1
 
 
 class FakeSession:

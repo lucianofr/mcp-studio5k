@@ -24,6 +24,9 @@ class FakeRateLimiter:
 
             raise RateLimitError("cooldown")
 
+    def record_write(self, now=None):
+        self.recorded = getattr(self, "recorded", 0) + 1
+
 
 def _kwargs(**over):
     base = dict(

@@ -24,8 +24,9 @@ from .envelope import err_envelope, ok_envelope
 from .inspect import strip_comments
 from .l5x.diff import diff_routines
 from .l5x.import_result import parse_import_errors, summarize_imported_elements
-from .l5x.parse import parse_l5x
+from .l5x.parse import L5xParseError, parse_l5x
 from .l5x.validate import validate_l5x
+from .project_session import SessionError
 from .safety import RateLimitError, SafetyError, check_safety_exclusions
 
 # ---------------------------------------------------------------------------
@@ -72,12 +73,15 @@ def _import_success_envelope(applied: dict, l5x_content: str, *, max_bytes: int)
 # ---------------------------------------------------------------------------
 
 
-def make_change_token(l5x_content: str, x_path: str, *, salt: str) -> str:
-    """Return a 64-char hex SHA-256 token that binds content + xpath + salt.
+def make_change_token(
+    l5x_content: str, x_path: str, *, salt: str, context: str = ""
+) -> str:
+    """Return a 64-char hex SHA-256 token binding content + xpath + salt + context.
 
     The token is deterministic: same inputs always produce the same hex string.
-    Changing any byte of *l5x_content*, *x_path*, or *salt* yields a different
-    token, so Task 21 can detect a substitution attack or a stale preview.
+    *context* binds the token to the project state the human actually previewed
+    (current-routine hash + project path, see ``_token_context``), so a token
+    stops validating when the routine changes or a different project is opened.
     """
     digest = hashlib.sha256()
     digest.update(l5x_content.encode("utf-8"))
@@ -85,7 +89,16 @@ def make_change_token(l5x_content: str, x_path: str, *, salt: str) -> str:
     digest.update(x_path.encode("utf-8"))
     digest.update(_TOKEN_SEPARATOR)
     digest.update(salt.encode("utf-8"))
+    digest.update(_TOKEN_SEPARATOR)
+    digest.update(context.encode("utf-8"))
     return digest.hexdigest()
+
+
+def _token_context(session, current: str) -> str:
+    """Context string binding a change token to project identity + current state."""
+    project_path = session.status().get("path") or ""
+    state_digest = hashlib.sha256(current.encode("utf-8")).hexdigest()
+    return f"{state_digest}\x00{project_path}"
 
 
 # ---------------------------------------------------------------------------
@@ -112,39 +125,81 @@ def _format_issues(issues) -> str:
     return "; ".join(parts) or "L5X validation failed"
 
 
-def _referenced_operands(l5x_content: str) -> list[str]:
-    """Extract all candidate tag/operand names from L5X content.
+# Dotted tag path (Pump1.Speed → base tag Pump1); a name followed by "(" is an
+# instruction/function call (XIC(...), TON(...)), not a tag reference.
+_TAG_PATH = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)(\s*\()?"
+)
 
-    Collects XML ``Operand`` attributes plus bare identifiers from
-    ``<Text>`` and ``<Line>`` element bodies.  Uses the hardened parser
-    so malicious XML is rejected before any traversal.
+# Structured Text keywords/operators that the identifier scan must not report
+# as "tags missing from the project".
+_ST_KEYWORDS = frozenset({
+    "IF", "THEN", "ELSE", "ELSIF", "END_IF", "CASE", "OF", "END_CASE",
+    "FOR", "TO", "BY", "DO", "END_FOR", "WHILE", "END_WHILE",
+    "REPEAT", "UNTIL", "END_REPEAT", "EXIT", "RETURN",
+    "NOT", "AND", "OR", "XOR", "MOD", "TRUE", "FALSE",
+})
+
+
+def _referenced_operands(l5x_content: str) -> list[str]:
+    """Extract candidate BASE tag names referenced by the L5X content.
+
+    Collects XML ``Operand`` attributes plus identifiers from ``<Text>`` and
+    ``<Line>`` element bodies, excluding instruction/function mnemonics
+    (identifiers followed by "(") and ST keywords, and reducing dotted member
+    paths to their base tag. Uses the hardened parser so malicious XML is
+    rejected before any traversal.
     """
     root = parse_l5x(l5x_content)
     operands: list[str] = []
     for el in root.iter():
         op = el.get("Operand")
         if op:
-            operands.append(op)
+            operands.append(op.split(".")[0])
     for node in root.findall(".//Text") + root.findall(".//Line"):
-        if node.text:
-            operands.extend(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", node.text))
+        if not node.text:
+            continue
+        for match in _TAG_PATH.finditer(node.text):
+            name, is_call = match.group(1), match.group(2)
+            if is_call:
+                continue  # instruction/function mnemonic, not a tag
+            base = name.split(".")[0]
+            if base.upper() in _ST_KEYWORDS:
+                continue
+            operands.append(base)
     return operands
 
 
 async def _project_tag_names(session) -> set[str]:
-    """Collect every controller-scoped tag name via paginated list_tags calls."""
-    from .inspect import list_tags
+    """Collect controller- AND program-scoped tag names via paginated list calls.
 
-    names: set[str] = set()
+    Program-scoped tags are legitimate references in routine logic; checking
+    only the controller scope would flag them as missing.
+    """
+    from .inspect import list_programs, list_tags
+
+    scopes: list[str] = ["controller"]
     cursor = None
     while True:
-        page = await list_tags(session, "controller", page_size=500, cursor=cursor)
+        page = await list_programs(session, page_size=500, cursor=cursor)
         if not page["ok"]:
             break
-        names.update(t["name"] for t in page["data"])
+        scopes.extend(p["name"] for p in page["data"])
         cursor = page["meta"]["page"]
         if cursor is None:
             break
+
+    names: set[str] = set()
+    for scope in scopes:
+        cursor = None
+        while True:
+            page = await list_tags(session, scope, page_size=500, cursor=cursor)
+            if not page["ok"]:
+                break
+            names.update(t["name"] for t in page["data"])
+            cursor = page["meta"]["page"]
+            if cursor is None:
+                break
     return names
 
 
@@ -175,15 +230,17 @@ async def preview_import(
     if not validation.ok:
         return err_envelope(_format_issues(validation.issues))
 
-    # Step 2 — export the current routine (None means "new routine", so ValueError
-    # from a bad x_path surfaces here as an err envelope).
+    # Step 2 — export the current routine; a bad x_path / closed session / SDK
+    # failure surfaces here as an err envelope (never a raw exception).
     try:
-        current = strip_comments(await session.partial_export(x_path))
-    except ValueError as exc:
+        current = strip_comments(
+            await session.partial_export(x_path), max_bytes=max_bytes
+        )
+    except (ValueError, SessionError, L5xParseError) as exc:
         return err_envelope(str(exc))
 
     # Step 3 — diff current vs. proposed (positional call, reconciliation rule 3).
-    new_content = strip_comments(l5x_content)
+    new_content = strip_comments(l5x_content, max_bytes=max_bytes)
     diff = diff_routines(current, new_content)
 
     # Step 4 — identify referenced tags not yet in the project.
@@ -191,8 +248,11 @@ async def preview_import(
     referenced = _referenced_operands(l5x_content)
     missing = sorted({op for op in referenced if op not in existing})
 
-    # Step 5 — mint a content-bound change token.
-    token = make_change_token(l5x_content, x_path, salt=salt)
+    # Step 5 — mint a change token bound to content + xpath + salt + the exact
+    # current state (and project) the human is about to confirm against.
+    token = make_change_token(
+        l5x_content, x_path, salt=salt, context=_token_context(session, current)
+    )
 
     return ok_envelope(
         {
@@ -250,7 +310,20 @@ async def import_l5x(
     # would let an attacker who knows content+xpath forge a token, so reject it.
     if not salt or not salt.strip():
         return err_envelope("import refused: server salt is not configured")
-    recomputed = make_change_token(l5x_content, x_path, salt=salt)
+    # Recompute against the CURRENT project state so a token minted before the
+    # routine changed (or against another project) stops validating.
+    try:
+        current = strip_comments(
+            await session.partial_export(x_path), max_bytes=max_bytes
+        )
+    except (ValueError, SessionError, L5xParseError) as exc:
+        return err_envelope(
+            f"import refused: cannot export current state for change_token "
+            f"verification: {exc}"
+        )
+    recomputed = make_change_token(
+        l5x_content, x_path, salt=salt, context=_token_context(session, current)
+    )
     if (
         not change_token
         or not expected_change_token
@@ -258,7 +331,8 @@ async def import_l5x(
         or not hmac.compare_digest(expected_change_token, recomputed)
     ):
         return err_envelope(
-            "import refused: change_token missing or does not match a recent preview_import"
+            "import refused: change_token missing or does not match a recent "
+            "preview_import (the project state may have changed since the preview)"
         )
 
     # Guard 3: collision option allowlist
@@ -287,21 +361,22 @@ async def import_l5x(
             + ", ".join(sorted(hits))
         )
 
-    # Guard 6: rate limit
+    # Guard 6: rate limit. Fall back to a real monotonic clock when the caller
+    # omits `now` so the cooldown always engages.
+    now_val = now if now is not None else time.monotonic()
     try:
-        # Fall back to a real monotonic clock when the caller omits `now`.
-        # Passing now=None would leave WriteRateLimiter._last_write unset and
-        # fail-open (cooldown never engages), so the gate always supplies a float.
-        rate_limiter.check(now=now if now is not None else time.monotonic())
+        rate_limiter.check(now=now_val)
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
     # All guards passed — apply exactly once.  A failed import (rollback or raw SDK
-    # fault) is turned into a structured, machine-correctable error list.
+    # fault) is turned into a structured, machine-correctable error list and does
+    # NOT consume the write budget; only a successful write records.
     try:
         await session.apply_l5x_import(l5x_content, x_path, collision_option)
     except Exception as exc:
         return _import_failure_envelope(exc)
+    rate_limiter.record_write(now=now_val)
     return _import_success_envelope(
         {"applied": True, "x_path": x_path, "collision_option": collision_option},
         l5x_content,
@@ -376,8 +451,9 @@ async def import_tag_l5x(
             + ", ".join(sorted(hits))
         )
 
+    now_val = now if now is not None else time.monotonic()
     try:
-        rate_limiter.check(now=now if now is not None else time.monotonic())
+        rate_limiter.check(now=now_val)
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
@@ -385,6 +461,7 @@ async def import_tag_l5x(
         await session.apply_l5x_import(l5x_content, x_path, collision_option)
     except Exception as exc:
         return _import_failure_envelope(exc)
+    rate_limiter.record_write(now=now_val)
     return _import_success_envelope(
         {"applied": True, "x_path": x_path, "collision_option": collision_option},
         l5x_content,
@@ -481,8 +558,9 @@ async def _apply_file_import(
             + ", ".join(sorted(hits))
         )
 
+    now_val = now if now is not None else time.monotonic()
     try:
-        rate_limiter.check(now=now if now is not None else time.monotonic())
+        rate_limiter.check(now=now_val)
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
@@ -491,6 +569,7 @@ async def _apply_file_import(
     except Exception as exc:  # SessionError/rollback or SDK failure → structured errors
         return _import_failure_envelope(exc)
 
+    rate_limiter.record_write(now=now_val)
     return _import_success_envelope(
         {
             "applied": True,
@@ -621,8 +700,9 @@ async def import_rungs_l5x(
             + ", ".join(sorted(hits))
         )
 
+    now_val = now if now is not None else time.monotonic()
     try:
-        rate_limiter.check(now=now if now is not None else time.monotonic())
+        rate_limiter.check(now=now_val)
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
@@ -632,6 +712,7 @@ async def import_rungs_l5x(
         )
     except Exception as exc:
         return _import_failure_envelope(exc)
+    rate_limiter.record_write(now=now_val)
     return _import_success_envelope(
         {
             "applied": True,
@@ -682,8 +763,9 @@ async def import_with_target_l5x(
             + ", ".join(sorted(hits))
         )
 
+    now_val = now if now is not None else time.monotonic()
     try:
-        rate_limiter.check(now=now if now is not None else time.monotonic())
+        rate_limiter.check(now=now_val)
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
@@ -691,6 +773,7 @@ async def import_with_target_l5x(
         await session.apply_import_with_target(l5x_content, x_path, target_name)
     except Exception as exc:
         return _import_failure_envelope(exc)
+    rate_limiter.record_write(now=now_val)
     return _import_success_envelope(
         {"applied": True, "x_path": x_path, "target_name": target_name},
         l5x_content,

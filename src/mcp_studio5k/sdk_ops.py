@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from mcp_studio5k.backup import BackupError, make_verified_backup, restore_backup
+from mcp_studio5k.backup import BackupError, make_verified_backup
 from mcp_studio5k.safety import SafetyError, check_safety_exclusions
 
 # Read ops: no project/controller state change. Enum results map to .name.
@@ -213,10 +213,13 @@ class SdkOpsMixin:
                     await _save
                 await self._reopen()
             except Exception as exc:
-                try:
-                    restore_backup(backup, acd_path)
-                except Exception:
-                    pass
+                restore_err = self._try_restore(backup, acd_path)
+                if restore_err is not None:
+                    await self._invalidate()
+                    raise _session_error(
+                        f"upload failed AND rollback restore failed ({restore_err}); "
+                        f"session invalidated — on-disk .ACD may be in the failed state: {exc}"
+                    ) from exc
                 from mcp_studio5k.engine import is_engine_fault
 
                 if is_engine_fault(exc) and self._engine_restart is not None:
@@ -316,7 +319,10 @@ class SdkOpsMixin:
     async def list_processor_types(self, major_revision: int) -> list[dict]:
         async with self._lock:
             if self._engine_ensure is not None:
-                await self._engine_ensure()
+                try:
+                    await self._engine_ensure()
+                except Exception as exc:
+                    raise _session_error(f"engine could not be started: {exc}") from exc
             try:
                 result = await self._sdk_cls.get_processor_types(major_revision)
             except Exception as exc:
@@ -351,7 +357,10 @@ class SdkOpsMixin:
             if not resolved.exists():
                 raise _session_error(f"project file not found: {resolved}")
             if self._engine_ensure is not None:
-                await self._engine_ensure()
+                try:
+                    await self._engine_ensure()
+                except Exception as exc:
+                    raise _session_error(f"engine could not be started: {exc}") from exc
             try:
                 backup = make_verified_backup(
                     resolved,
@@ -368,10 +377,13 @@ class SdkOpsMixin:
                 if inspect.isawaitable(_closed):
                     await _closed
             except Exception as exc:
-                try:
-                    restore_backup(backup, resolved)
-                except Exception:
-                    pass
+                restore_err = self._try_restore(backup, resolved)
+                if restore_err is not None:
+                    await self._invalidate()
+                    raise _session_error(
+                        f"convert failed AND rollback restore failed ({restore_err}); "
+                        f"session invalidated — on-disk .ACD may be in the failed state: {exc}"
+                    ) from exc
                 raise _session_error(
                     f"convert failed and the file was restored: {exc}"
                 ) from exc
@@ -392,7 +404,10 @@ class SdkOpsMixin:
             if self._path is not None and resolved == self._path:
                 raise _session_error("path is the currently open project")
             if self._engine_ensure is not None:
-                await self._engine_ensure()
+                try:
+                    await self._engine_ensure()
+                except Exception as exc:
+                    raise _session_error(f"engine could not be started: {exc}") from exc
             try:
                 handle = await self._sdk_cls.upload_to_new_project(
                     str(resolved), comm_path
