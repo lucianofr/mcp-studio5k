@@ -48,3 +48,32 @@ rung replaces persisted fine.
 - **Live verification required:** open a test `.ACD` copy, `import_routine_l5x` OVERWRITE,
   save→close→open→export, verify by value (per handoff §2–§3). Unit tests confirm routing +
   envelope only, not real SDK persistence.
+
+---
+
+## UPDATE (live isolation, same day) — corrected root cause
+
+Live tests on an RC02a copy (healthy engine) disproved the routing theory:
+
+- **with_target routine overwrite ALSO aborted NO_CHANGES** → routing was never the cause.
+- **count-CHANGING rung import (1→2) with ZERO new refs → APPLIED and PERSISTED** (17→18).
+  So structural/count change is NOT the limit.
+- A rung referencing the newly-added `GANHO_VAZAO_MALHA` (1→1) applied.
+
+**Real root cause (B2):** the engine aborts the WHOLE import with
+`XMLSrv_E_IMPORT_ABORTED_NO_CHANGES` when any rung operand does not resolve
+(unknown tag / UDT member / AOI) — all-or-nothing because `continue_on_errors=False`.
+The token is a misleading label for an engine rejection. For the RC02a 20-rung
+design the unresolved operand is in the scheduling block (candidates
+`GI.Cmd.Dir_D` / `GI.Cmd.Dir_E`).
+
+**Correction applied in code:** reverted the routine→with_target routing (a
+Routine IS a valid generic target via the `Program.*` rule; generic
+`OVERWRITE_ON_COLL` is the correct overwrite interface). The NO_CHANGES honesty
+change is kept.
+
+**Next durable fix (not yet built):** on NO_CHANGES, run a reference pre-flight —
+parse the L5X operands and check them against the live project
+(`list_tags` / `get_udt_definition` / `get_aoi_signature`), reporting the exact
+missing operand instead of the cryptic token. `continue_on_errors=True` is NOT a
+safe default (would partially apply control logic).
