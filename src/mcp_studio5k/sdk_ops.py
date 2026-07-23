@@ -249,8 +249,11 @@ class SdkOpsMixin:
         replace_count: int = 0,
         *,
         expected_project_path=None,
-    ) -> None:
-        """Import rungs into an existing routine with full rollback semantics."""
+    ) -> str:
+        """Import rungs into an existing routine with full rollback semantics.
+
+        Returns the import outcome (``IMPORT_APPLIED`` / ``IMPORT_NO_CHANGES``).
+        """
         async with self._lock:
             self._require_active(expected_project_path)
             self._check_import_safety(l5x_content)
@@ -268,7 +271,7 @@ class SdkOpsMixin:
                 if inspect.isawaitable(_imp):
                     await _imp
 
-            await self._import_file_mutation_locked(l5x_content, _sdk_import)
+            return await self._import_file_mutation_locked(l5x_content, _sdk_import)
 
     async def apply_import_with_target(
         self,
@@ -277,8 +280,14 @@ class SdkOpsMixin:
         target_name: str,
         *,
         expected_project_path=None,
-    ) -> None:
-        """Import a single renameable component (target_name) with rollback."""
+    ) -> str:
+        """Import a single renameable component (target_name) with rollback.
+
+        Returns the import outcome (``IMPORT_APPLIED`` / ``IMPORT_NO_CHANGES``).
+        This is the correct SDK path for a Routine: the generic
+        partial_import interface cannot Target a ``Routine`` node, so routine
+        imports route here (partial_import_with_target) instead.
+        """
         async with self._lock:
             self._require_active(expected_project_path)
             self._check_import_safety(l5x_content)
@@ -295,7 +304,7 @@ class SdkOpsMixin:
                 if inspect.isawaitable(_imp):
                     await _imp
 
-            await self._import_file_mutation_locked(l5x_content, _sdk_import)
+            return await self._import_file_mutation_locked(l5x_content, _sdk_import)
 
     def _check_import_safety(self, l5x_content: str) -> None:
         """Shared pre-import safety gate (DOCTYPE/oversize/excluded tags)."""

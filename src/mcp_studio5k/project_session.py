@@ -28,6 +28,13 @@ _TAG_VALUE_TYPES = frozenset({
 # The SDK raises OperationNotPerformedError whose str() contains this substring.
 # We detect it via substring check (no SDK import needed → tests stay SDK-free).
 IMPORT_NO_CHANGES_TOKEN = "XMLSrv_E_IMPORT_ABORTED_NO_CHANGES"
+# Sentinel returned by the import mutation helpers when the SDK aborted with the
+# NO_CHANGES token: the session stays healthy but NOTHING was written. Callers
+# MUST surface this as a non-applied result — reporting it as applied=true is the
+# "applied:true mentiroso" silent no-op bug (e.g. a Routine payload sent through
+# the generic partial_import interface, which cannot Target a Routine node).
+IMPORT_NO_CHANGES = "no_changes"
+IMPORT_APPLIED = "applied"
 
 
 class SessionError(Exception):
@@ -322,8 +329,13 @@ class ProjectSession(SdkOpsMixin):
         collision_option: str,
         *,
         expected_project_path: "Path | None" = None,
-    ) -> None:
-        """Import L5X into the project with full backup-verify-operate-reopen-rollback."""
+    ) -> str:
+        """Import L5X into the project with full backup-verify-operate-reopen-rollback.
+
+        Returns ``IMPORT_APPLIED`` when the SDK wrote a change, or
+        ``IMPORT_NO_CHANGES`` when the SDK aborted with the NO_CHANGES token
+        (session stays healthy; caller must NOT report applied=true).
+        """
         async with self._lock:
             self._require_active(expected_project_path)
 
@@ -354,9 +366,9 @@ class ProjectSession(SdkOpsMixin):
                 if inspect.isawaitable(_imp):
                     await _imp
 
-            await self._import_file_mutation_locked(l5x_content, _sdk_import)
+            return await self._import_file_mutation_locked(l5x_content, _sdk_import)
 
-    async def _import_file_mutation_locked(self, l5x_content: str, sdk_import) -> None:
+    async def _import_file_mutation_locked(self, l5x_content: str, sdk_import) -> str:
         """Backup → tmp L5X → sdk_import(tmp) → save → reopen-to-verify → rollback.
 
         Extracted body of apply_l5x_import so rung/target imports (sdk_ops.py)
@@ -399,7 +411,10 @@ class ProjectSession(SdkOpsMixin):
                 # No restore, no invalidate, no write_count bump; session stays open.
                 # NOTE: this check applies ONLY to the import call, not to _reopen().
                 if IMPORT_NO_CHANGES_TOKEN in str(exc):
-                    return  # benign; outer finally removes tmp_l5x
+                    # NOT benign success: the SDK made no change. Session stays
+                    # healthy (no restore, no invalidate, no write_count bump) but
+                    # we report NO_CHANGES up so the caller never claims applied.
+                    return IMPORT_NO_CHANGES  # outer finally removes tmp_l5x
 
                 # Restore backup regardless of fault type. A failed restore must
                 # never be reported as a successful rollback: invalidate and
@@ -515,6 +530,7 @@ class ProjectSession(SdkOpsMixin):
             except OSError:
                 pass
         self._write_count += 1
+        return IMPORT_APPLIED
 
     async def save(self, *, expected_project_path: "Path | None" = None) -> None:
         """Save the project with full backup-verify-operate-reopen-rollback."""
