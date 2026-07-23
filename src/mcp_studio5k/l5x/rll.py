@@ -1,6 +1,7 @@
 """Ladder (LD/RLL) routine validation — linear rungs."""
 from __future__ import annotations
 
+from mcp_studio5k.l5x.branches import single_leg_branch_spans
 from mcp_studio5k.l5x.errors import ValidationIssue
 
 START_RUNG_NUMBER = 0
@@ -70,6 +71,22 @@ def validate_rll(routine_el) -> tuple[ValidationIssue, ...]:
                     line=number,
                 )
             )
+
+        if text_el is not None and text_el.text:
+            for span in single_leg_branch_spans(text_el.text):
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        path=rung_path,
+                        message=(
+                            f"Rung has a single-leg branch {span!r} (no "
+                            "top-level comma) — the SDK import rejects this and "
+                            "aborts with NO_CHANGES; use series (remove the "
+                            "brackets) or add a parallel leg"
+                        ),
+                        line=number,
+                    )
+                )
 
         if number != expected:
             issues.append(

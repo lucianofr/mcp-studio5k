@@ -103,6 +103,33 @@ def test_refuse_routine_targettype(tmp_path):
     assert session.imports == []
 
 
+_SINGLE_LEG_ROUTINE = (
+    '<?xml version="1.0"?>'
+    '<RSLogix5000Content TargetName="R_X" TargetType="Routine">'
+    '<Controller Use="Context" Name="C"><Programs Use="Context">'
+    '<Program Use="Context" Name="P"><Routines Use="Context">'
+    '<Routine Use="Target" Name="R_X" Type="RLL"><RLLContent>'
+    '<Rung Number="0" Type="N"><Text><![CDATA[MUL(A.JSP,1.15,G.AUX)'
+    "[GRT(C.PV,G.AUX)MOV(G.KP,C.JGP)];]]></Text></Rung>"
+    "</RLLContent></Routine></Routines></Program></Programs></Controller>"
+    "</RSLogix5000Content>"
+)
+
+
+def test_import_routine_single_leg_branch_refused_preflight(tmp_path):
+    # Pre-flight must reject the RC02a rung-11 defect class BEFORE the SDK sees
+    # it — the engine would otherwise abort the whole import as NO_CHANGES.
+    p = _write(tmp_path, "R_X.L5X", _SINGLE_LEG_ROUTINE)
+    session = FakeSession()
+    resp, _ = _run_routine(p, session=session)
+    assert resp["ok"] is False
+    assert "single-leg branch" in resp["error"]
+    assert "rung 0" in resp["error"]
+    # never reached the SDK
+    assert session.imports == []
+    assert session.target_imports == []
+
+
 def test_refuse_non_l5x_suffix(tmp_path):
     p = _write(tmp_path, "MALHA_03.txt", AOI_L5X)
     resp, _ = _run(p)

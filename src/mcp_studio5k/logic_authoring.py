@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .envelope import err_envelope, ok_envelope
 from .inspect import strip_comments
+from .l5x.branches import find_single_leg_branches
 from .l5x.diff import diff_routines
 from .l5x.import_result import parse_import_errors, summarize_imported_elements
 from .l5x.parse import L5xParseError, parse_l5x
@@ -38,6 +39,32 @@ from .safety import RateLimitError, SafetyError, check_safety_exclusions
 # ---------------------------------------------------------------------------
 
 _TOKEN_SEPARATOR = b"\x00"
+
+def _single_leg_branch_error(content: str, *, max_bytes: int) -> "dict | None":
+    """Pre-flight: reject a payload with a single-leg RLL branch before import.
+
+    The SDK rejects a branch with no top-level comma and aborts the WHOLE import
+    as NO_CHANGES with no pointer to the offending rung (the RC02a rung-11
+    defect class). Catch it here so the caller gets a precise, actionable error
+    instead of the cryptic engine abort. Malformed XML is left to the parse/
+    validation layers — this check only fires on well-formed payloads.
+    """
+    try:
+        root = parse_l5x(content, max_bytes=max_bytes)
+    except L5xParseError:
+        return None
+    offenders = find_single_leg_branches(root)
+    if not offenders:
+        return None
+    detail = "; ".join(
+        f"rung {n if n is not None else '?'}: {snip}" for n, snip in offenders
+    )
+    return err_envelope(
+        "import refused: single-leg branch detected — the SDK rejects a branch "
+        "with no top-level comma and aborts the whole import (NO_CHANGES). Fix to "
+        "series (remove the brackets) or add a parallel leg. Offending: " + detail
+    )
+
 
 def _import_no_changes_envelope(details: dict) -> dict:
     """Honest envelope for a NO_CHANGES abort — nothing was written.
@@ -395,6 +422,10 @@ async def import_l5x(
     # All guards passed — apply exactly once.  A failed import (rollback or raw SDK
     # fault) is turned into a structured, machine-correctable error list and does
     # NOT consume the write budget; only a successful write records.
+    branch_err = _single_leg_branch_error(l5x_content, max_bytes=max_bytes)
+    if branch_err is not None:
+        return branch_err
+
     try:
         outcome = await session.apply_l5x_import(l5x_content, x_path, collision_option)
     except Exception as exc:
@@ -483,6 +514,10 @@ async def import_tag_l5x(
         rate_limiter.check(now=now_val)
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
+
+    branch_err = _single_leg_branch_error(l5x_content, max_bytes=max_bytes)
+    if branch_err is not None:
+        return branch_err
 
     try:
         outcome = await session.apply_l5x_import(l5x_content, x_path, collision_option)
@@ -601,6 +636,10 @@ async def _apply_file_import(
         rate_limiter.check(now=now_val)
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
+
+    branch_err = _single_leg_branch_error(content, max_bytes=max_bytes)
+    if branch_err is not None:
+        return branch_err
 
     try:
         outcome = await session.apply_l5x_import(content, x_path, collision_option)
@@ -753,6 +792,10 @@ async def import_rungs_l5x(
         rate_limiter.check(now=now_val)
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
+
+    branch_err = _single_leg_branch_error(l5x_content, max_bytes=max_bytes)
+    if branch_err is not None:
+        return branch_err
 
     try:
         outcome = await session.apply_rungs_import(

@@ -77,3 +77,24 @@ parse the L5X operands and check them against the live project
 (`list_tags` / `get_udt_definition` / `get_aoi_signature`), reporting the exact
 missing operand instead of the cryptic token. `continue_on_errors=True` is NOT a
 safe default (would partially apply control logic).
+
+---
+
+## UPDATE 2 — durable pre-flight for single-leg branches
+
+Root cause of the RC02a design NO_CHANGES was finally isolated (live bisect):
+**rung 11 had a single-leg branch** `MUL(...)[GRT(...)MOV MOV]` — a `[...]` with
+no top-level comma. The engine rejects a one-leg branch and aborts the WHOLE
+import as NO_CHANGES. All operands resolved; the bracket was the trigger.
+
+Durable fix added:
+- `l5x/branches.py` — `single_leg_branch_spans` / `find_single_leg_branches`:
+  char-scan (paren/bracket stack) that flags any `[...]` with no leg-level comma,
+  ignoring commas inside `MOV(a,b)` and nested branches.
+- `l5x/rll.py` — `validate_rll` now emits an error issue per single-leg branch,
+  so `validate_l5x` catches it offline (no project needed).
+- `logic_authoring._single_leg_branch_error` — pre-flight wired into the routine,
+  rungs, and generic import paths: refuses the payload with a rung-pinpointed
+  message BEFORE the SDK call, instead of the cryptic engine NO_CHANGES.
+- Tests: `tests/test_l5x_branches.py` (7) + a routine import-path refusal test.
+368 tests pass.
