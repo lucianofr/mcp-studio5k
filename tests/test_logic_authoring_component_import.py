@@ -160,25 +160,23 @@ def _run_routine(path, x_path=RTN_XPATH, **kw):
     return resp, session
 
 
-def test_import_routine_routes_to_with_target(tmp_path):
-    # A Routine cannot be Targeted by the generic partial_import interface, so
-    # routine import MUST use partial_import_with_target (target = routine name
-    # from the L5X root TargetName). Regression guard for the RLL write no-op.
+def test_import_routine_applies_at_xpath(tmp_path):
+    # A Routine is a valid generic-import target (Program.* rule), so routine
+    # import goes through the generic partial_import with OVERWRITE_ON_COLL.
     p = _write(tmp_path, "C_CONTROLE.L5X", ROUTINE_L5X)
     session = FakeSession()
     resp, _ = _run_routine(p, session=session)
     assert resp["ok"] is True
     assert resp["data"]["x_path"] == RTN_XPATH
-    assert resp["data"]["target_name"] == "MALHA_03"
-    # Must NOT go through the generic collision import…
-    assert session.imports == []
-    # …and MUST go through with_target with the extracted routine name.
-    assert session.target_imports and session.target_imports[0][1] == RTN_XPATH
-    assert session.target_imports[0][2] == "MALHA_03"
+    # generic import, overwrite so it can replace the existing routine
+    assert session.imports and session.imports[0][1] == RTN_XPATH
+    assert session.imports[0][2] == "OVERWRITE_ON_COLL"
+    assert session.target_imports == []
 
 
 def test_import_routine_no_changes_is_honest(tmp_path):
-    # SDK aborts with NO_CHANGES → must be reported as an error, never applied:true.
+    # SDK aborts with NO_CHANGES (e.g. an unresolved operand reference) → must be
+    # reported as an error, never applied:true.
     p = _write(tmp_path, "C_CONTROLE.L5X", ROUTINE_L5X)
     session = FakeSession(outcome="no_changes")
     resp, _ = _run_routine(p, session=session)

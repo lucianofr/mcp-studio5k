@@ -39,17 +39,6 @@ from .safety import RateLimitError, SafetyError, check_safety_exclusions
 
 _TOKEN_SEPARATOR = b"\x00"
 
-# Root-element attribute carrying the single component name in a partial export,
-# e.g. <RSLogix5000Content ... TargetName="R_MALHA03_VAZAO" TargetType="Routine">.
-_TARGET_NAME_RE = re.compile(r'\bTargetName="([^"]+)"')
-
-
-def _extract_target_name(content: str) -> "str | None":
-    """Pull the partial-export root ``TargetName`` (the component to import)."""
-    m = _TARGET_NAME_RE.search(content)
-    return m.group(1) if m else None
-
-
 def _import_no_changes_envelope(details: dict) -> dict:
     """Honest envelope for a NO_CHANGES abort — nothing was written.
 
@@ -573,17 +562,14 @@ async def _apply_file_import(
     max_bytes,
     allowed_target_types,
     now,
-    use_target=False,
 ):
     """Confirmed-gated file-based import shared by the component and routine tools.
 
-    ``use_target=True`` routes through the SDK ``partial_import_with_target``
-    interface instead of the generic ``partial_import_from_xml_file``. This is
-    REQUIRED for a Routine: the generic interface's allowed ``Use="Target"``
-    node set does not include ``Routine`` (only whole ``Program.*``), so a
-    standalone-routine payload matches no target and the SDK aborts with
-    NO_CHANGES — the silent no-op this fixes. with_target names the component
-    (routine) explicitly and does not take a collision option.
+    Both routines and components go through the generic
+    ``partial_import_from_xml_file`` (a Routine is a valid target via the
+    ``Program.*`` rule). A NO_CHANGES abort is surfaced honestly by the outcome
+    check below — it means the engine rejected the import (e.g. an unresolved
+    operand reference), NOT that the interface was wrong.
     """
     if confirmed is not True:
         return err_envelope("import refused: confirmed=True is required (human gate)")
@@ -594,15 +580,7 @@ async def _apply_file_import(
     if file_err is not None:
         return err_envelope(f"import refused: {file_err}")
 
-    target_name = None
-    if use_target:
-        target_name = _extract_target_name(content)
-        if not target_name:
-            return err_envelope(
-                "import refused: cannot determine target name from L5X "
-                "(missing root TargetName attribute)"
-            )
-    elif collision_option not in _ALLOWED_TAG_COLLISION:
+    if collision_option not in _ALLOWED_TAG_COLLISION:
         return err_envelope(
             f"import refused: collision_option must be one of "
             f"{sorted(_ALLOWED_TAG_COLLISION)}"
@@ -624,32 +602,28 @@ async def _apply_file_import(
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
-    applied_meta = {
-        "applied": True,
-        "x_path": x_path,
-        "source": str(Path(path)),
-        "bytes": byte_len,
-    }
     try:
-        if use_target:
-            outcome = await session.apply_import_with_target(
-                content, x_path, target_name
-            )
-            applied_meta["target_name"] = target_name
-        else:
-            outcome = await session.apply_l5x_import(
-                content, x_path, collision_option
-            )
-            applied_meta["collision_option"] = collision_option
+        outcome = await session.apply_l5x_import(content, x_path, collision_option)
     except Exception as exc:  # SessionError/rollback or SDK failure → structured errors
         return _import_failure_envelope(exc)
 
     if outcome == IMPORT_NO_CHANGES:
-        no_change_meta = {k: v for k, v in applied_meta.items() if k != "applied"}
-        return _import_no_changes_envelope(no_change_meta)
+        return _import_no_changes_envelope(
+            {"x_path": x_path, "collision_option": collision_option}
+        )
 
     rate_limiter.record_write(now=now_val)
-    return _import_success_envelope(applied_meta, content, max_bytes=max_bytes)
+    return _import_success_envelope(
+        {
+            "applied": True,
+            "x_path": x_path,
+            "collision_option": collision_option,
+            "source": str(Path(path)),
+            "bytes": byte_len,
+        },
+        content,
+        max_bytes=max_bytes,
+    )
 
 
 async def import_component_l5x(
@@ -709,10 +683,11 @@ async def import_routine_l5x(
     """
     if not x_path or not str(x_path).strip():
         return err_envelope("import refused: x_path (target routine) is required")
-    # Routines MUST go through partial_import_with_target: the generic
-    # partial_import interface cannot Target a Routine node (it aborts with
-    # NO_CHANGES). collision_option is accepted for API stability but ignored
-    # here — with_target replaces the named routine unconditionally.
+    # A Routine IS a valid Target for the generic partial_import interface
+    # (covered by the Program.* target rule), so OVERWRITE_ON_COLL is the correct
+    # overwrite path. A NO_CHANGES abort here is NOT a routing problem — it means
+    # the engine rejected the import (typically an unresolved operand reference in
+    # one of the rungs), which _apply_file_import now surfaces honestly.
     return await _apply_file_import(
         session,
         path,
@@ -724,7 +699,6 @@ async def import_routine_l5x(
         max_bytes=max_bytes,
         allowed_target_types=_ROUTINE_TARGET_TYPES,
         now=now,
-        use_target=True,
     )
 
 
