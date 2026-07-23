@@ -26,7 +26,11 @@ from .l5x.diff import diff_routines
 from .l5x.import_result import parse_import_errors, summarize_imported_elements
 from .l5x.parse import L5xParseError, parse_l5x
 from .l5x.validate import validate_l5x
-from .project_session import SessionError
+from .project_session import (
+    IMPORT_NO_CHANGES,
+    IMPORT_NO_CHANGES_TOKEN,
+    SessionError,
+)
 from .safety import RateLimitError, SafetyError, check_safety_exclusions
 
 # ---------------------------------------------------------------------------
@@ -34,6 +38,36 @@ from .safety import RateLimitError, SafetyError, check_safety_exclusions
 # ---------------------------------------------------------------------------
 
 _TOKEN_SEPARATOR = b"\x00"
+
+# Root-element attribute carrying the single component name in a partial export,
+# e.g. <RSLogix5000Content ... TargetName="R_MALHA03_VAZAO" TargetType="Routine">.
+_TARGET_NAME_RE = re.compile(r'\bTargetName="([^"]+)"')
+
+
+def _extract_target_name(content: str) -> "str | None":
+    """Pull the partial-export root ``TargetName`` (the component to import)."""
+    m = _TARGET_NAME_RE.search(content)
+    return m.group(1) if m else None
+
+
+def _import_no_changes_envelope(details: dict) -> dict:
+    """Honest envelope for a NO_CHANGES abort — nothing was written.
+
+    Prevents the "applied:true mentiroso" silent no-op: the SDK aborted with
+    ``XMLSrv_E_IMPORT_ABORTED_NO_CHANGES`` and made no change. This is an error
+    (ok=False) so callers never treat it as applied; the message points at the
+    usual causes (payload target/insert_position/replace_count resolving to no
+    real change, or the target already matching the payload).
+    """
+    env = err_envelope(
+        "import made NO changes: the SDK aborted with "
+        f"{IMPORT_NO_CHANGES_TOKEN} and nothing was written. Verify by value — do "
+        "NOT treat this as applied. Likely causes: the target already matches the "
+        "payload, or the payload's target node / insert_position / replace_count "
+        "did not resolve to a real change."
+    )
+    env["data"] = {"status": "no_changes", "applied": False, **details}
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -373,9 +407,13 @@ async def import_l5x(
     # fault) is turned into a structured, machine-correctable error list and does
     # NOT consume the write budget; only a successful write records.
     try:
-        await session.apply_l5x_import(l5x_content, x_path, collision_option)
+        outcome = await session.apply_l5x_import(l5x_content, x_path, collision_option)
     except Exception as exc:
         return _import_failure_envelope(exc)
+    if outcome == IMPORT_NO_CHANGES:
+        return _import_no_changes_envelope(
+            {"x_path": x_path, "collision_option": collision_option}
+        )
     rate_limiter.record_write(now=now_val)
     return _import_success_envelope(
         {"applied": True, "x_path": x_path, "collision_option": collision_option},
@@ -458,9 +496,13 @@ async def import_tag_l5x(
         return err_envelope(f"import refused: {exc}")
 
     try:
-        await session.apply_l5x_import(l5x_content, x_path, collision_option)
+        outcome = await session.apply_l5x_import(l5x_content, x_path, collision_option)
     except Exception as exc:
         return _import_failure_envelope(exc)
+    if outcome == IMPORT_NO_CHANGES:
+        return _import_no_changes_envelope(
+            {"x_path": x_path, "collision_option": collision_option}
+        )
     rate_limiter.record_write(now=now_val)
     return _import_success_envelope(
         {"applied": True, "x_path": x_path, "collision_option": collision_option},
@@ -531,8 +573,18 @@ async def _apply_file_import(
     max_bytes,
     allowed_target_types,
     now,
+    use_target=False,
 ):
-    """Confirmed-gated file-based import shared by the component and routine tools."""
+    """Confirmed-gated file-based import shared by the component and routine tools.
+
+    ``use_target=True`` routes through the SDK ``partial_import_with_target``
+    interface instead of the generic ``partial_import_from_xml_file``. This is
+    REQUIRED for a Routine: the generic interface's allowed ``Use="Target"``
+    node set does not include ``Routine`` (only whole ``Program.*``), so a
+    standalone-routine payload matches no target and the SDK aborts with
+    NO_CHANGES — the silent no-op this fixes. with_target names the component
+    (routine) explicitly and does not take a collision option.
+    """
     if confirmed is not True:
         return err_envelope("import refused: confirmed=True is required (human gate)")
 
@@ -542,7 +594,15 @@ async def _apply_file_import(
     if file_err is not None:
         return err_envelope(f"import refused: {file_err}")
 
-    if collision_option not in _ALLOWED_TAG_COLLISION:
+    target_name = None
+    if use_target:
+        target_name = _extract_target_name(content)
+        if not target_name:
+            return err_envelope(
+                "import refused: cannot determine target name from L5X "
+                "(missing root TargetName attribute)"
+            )
+    elif collision_option not in _ALLOWED_TAG_COLLISION:
         return err_envelope(
             f"import refused: collision_option must be one of "
             f"{sorted(_ALLOWED_TAG_COLLISION)}"
@@ -564,23 +624,32 @@ async def _apply_file_import(
     except RateLimitError as exc:
         return err_envelope(f"import refused: {exc}")
 
+    applied_meta = {
+        "applied": True,
+        "x_path": x_path,
+        "source": str(Path(path)),
+        "bytes": byte_len,
+    }
     try:
-        await session.apply_l5x_import(content, x_path, collision_option)
+        if use_target:
+            outcome = await session.apply_import_with_target(
+                content, x_path, target_name
+            )
+            applied_meta["target_name"] = target_name
+        else:
+            outcome = await session.apply_l5x_import(
+                content, x_path, collision_option
+            )
+            applied_meta["collision_option"] = collision_option
     except Exception as exc:  # SessionError/rollback or SDK failure → structured errors
         return _import_failure_envelope(exc)
 
+    if outcome == IMPORT_NO_CHANGES:
+        no_change_meta = {k: v for k, v in applied_meta.items() if k != "applied"}
+        return _import_no_changes_envelope(no_change_meta)
+
     rate_limiter.record_write(now=now_val)
-    return _import_success_envelope(
-        {
-            "applied": True,
-            "x_path": x_path,
-            "collision_option": collision_option,
-            "source": str(Path(path)),
-            "bytes": byte_len,
-        },
-        content,
-        max_bytes=max_bytes,
-    )
+    return _import_success_envelope(applied_meta, content, max_bytes=max_bytes)
 
 
 async def import_component_l5x(
@@ -640,6 +709,10 @@ async def import_routine_l5x(
     """
     if not x_path or not str(x_path).strip():
         return err_envelope("import refused: x_path (target routine) is required")
+    # Routines MUST go through partial_import_with_target: the generic
+    # partial_import interface cannot Target a Routine node (it aborts with
+    # NO_CHANGES). collision_option is accepted for API stability but ignored
+    # here — with_target replaces the named routine unconditionally.
     return await _apply_file_import(
         session,
         path,
@@ -651,6 +724,7 @@ async def import_routine_l5x(
         max_bytes=max_bytes,
         allowed_target_types=_ROUTINE_TARGET_TYPES,
         now=now,
+        use_target=True,
     )
 
 
@@ -707,11 +781,19 @@ async def import_rungs_l5x(
         return err_envelope(f"import refused: {exc}")
 
     try:
-        await session.apply_rungs_import(
+        outcome = await session.apply_rungs_import(
             l5x_content, x_path, insert_position, replace_count
         )
     except Exception as exc:
         return _import_failure_envelope(exc)
+    if outcome == IMPORT_NO_CHANGES:
+        return _import_no_changes_envelope(
+            {
+                "x_path": x_path,
+                "insert_position": insert_position,
+                "replace_count": replace_count,
+            }
+        )
     rate_limiter.record_write(now=now_val)
     return _import_success_envelope(
         {
@@ -770,9 +852,13 @@ async def import_with_target_l5x(
         return err_envelope(f"import refused: {exc}")
 
     try:
-        await session.apply_import_with_target(l5x_content, x_path, target_name)
+        outcome = await session.apply_import_with_target(l5x_content, x_path, target_name)
     except Exception as exc:
         return _import_failure_envelope(exc)
+    if outcome == IMPORT_NO_CHANGES:
+        return _import_no_changes_envelope(
+            {"x_path": x_path, "target_name": target_name}
+        )
     rate_limiter.record_write(now=now_val)
     return _import_success_envelope(
         {"applied": True, "x_path": x_path, "target_name": target_name},

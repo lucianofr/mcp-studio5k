@@ -36,11 +36,18 @@ class FakeRateLimiter:
 
 
 class FakeSession:
-    def __init__(self) -> None:
+    def __init__(self, outcome: str = "applied") -> None:
         self.imports: list[tuple[str, str, str]] = []
+        self.target_imports: list[tuple[str, str, str]] = []
+        self._outcome = outcome
 
-    async def apply_l5x_import(self, content, x_path, collision_option) -> None:
+    async def apply_l5x_import(self, content, x_path, collision_option) -> str:
         self.imports.append((content, x_path, collision_option))
+        return self._outcome
+
+    async def apply_import_with_target(self, content, x_path, target_name) -> str:
+        self.target_imports.append((content, x_path, target_name))
+        return self._outcome
 
 
 def _run(path, **kw):
@@ -153,15 +160,32 @@ def _run_routine(path, x_path=RTN_XPATH, **kw):
     return resp, session
 
 
-def test_import_routine_applies_at_xpath(tmp_path):
+def test_import_routine_routes_to_with_target(tmp_path):
+    # A Routine cannot be Targeted by the generic partial_import interface, so
+    # routine import MUST use partial_import_with_target (target = routine name
+    # from the L5X root TargetName). Regression guard for the RLL write no-op.
     p = _write(tmp_path, "C_CONTROLE.L5X", ROUTINE_L5X)
     session = FakeSession()
     resp, _ = _run_routine(p, session=session)
     assert resp["ok"] is True
     assert resp["data"]["x_path"] == RTN_XPATH
-    assert session.imports and session.imports[0][1] == RTN_XPATH
-    # routine import defaults to overwrite so it can replace the existing routine
-    assert session.imports[0][2] == "OVERWRITE_ON_COLL"
+    assert resp["data"]["target_name"] == "MALHA_03"
+    # Must NOT go through the generic collision import…
+    assert session.imports == []
+    # …and MUST go through with_target with the extracted routine name.
+    assert session.target_imports and session.target_imports[0][1] == RTN_XPATH
+    assert session.target_imports[0][2] == "MALHA_03"
+
+
+def test_import_routine_no_changes_is_honest(tmp_path):
+    # SDK aborts with NO_CHANGES → must be reported as an error, never applied:true.
+    p = _write(tmp_path, "C_CONTROLE.L5X", ROUTINE_L5X)
+    session = FakeSession(outcome="no_changes")
+    resp, _ = _run_routine(p, session=session)
+    assert resp["ok"] is False
+    assert resp["data"]["applied"] is False
+    assert resp["data"]["status"] == "no_changes"
+    assert "NO changes" in resp["error"]
 
 
 def test_routine_refuses_empty_xpath(tmp_path):
