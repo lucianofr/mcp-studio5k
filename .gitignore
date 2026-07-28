@@ -10,3 +10,11 @@ dist/
 .superpowers/
 *.tmp
 .claude/settings.local.json
+
+# Rockwell proprietary SDK (not redistributable)
+sdk/
+logix_designer_sdk-*.whl
+
+# Tooling caches / junk
+.serena/
+NUL
